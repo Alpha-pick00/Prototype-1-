@@ -92,6 +92,105 @@ def test_strip_danawa_boilerplate_passes_through_unknown_text_unchanged():
     assert "가격은 12,900원입니다." in cleaned
 
 
+# -- app.search._strip_elevenst_boilerplate ------------------------------------
+# 실측 raw_content 샘플 기반(2026-08-20: 11번가 "광동제약 옥수수수염차" 상품
+# 페이지 추출) - 판매자 지표/포인트 적립/찜하기/반품·교환 정책 문단을 걸러내고,
+# 가격 라벨처럼 실제 값을 가리키는 줄은 남기는지 확인한다.
+
+_ELEVENST_RAW_SAMPLE = """본문 바로가기
+스토어 뱃지
+:   고객서비스 우수
+판매자만족
+:   100%
+응답률
+:   100%
+판매량
+:   총 5점 중 3점
+## 상품 카테고리 정보
+1. 홈  >
+2. 커피/생수/음료
+브랜드패션
+트렌드패션
+뷰티
+식품
+## 상품 요약 정보
+N 광동제약 옥수수수염차 340mLx20EA
+원산지:
+:   상세설명 참조
+* 찜 완료
+:   **찜**이 되었습니다.
+가격정보
+:   **24,300 원**
+최대 적립 포인트
+:   **2,114P**
+11pay 포인트
+:   *2,114P*
+11pay 포인트 적립 안내
+:   + 구매 적립 : 11pay 포인트 적립 대상 상품을 PC 바로가기 또는 11번가앱을 통해 11pay로 결제 후 구매확정 시, 0.5% 자동 적립.
+* 최대 리뷰 적립
+:   최대 *170P*  적립
+텍스트 리뷰 작성 시
+:   *30P*
+반품/교환 정보
+:   (구매자귀책) 3,000원/6,000원 초기배송비 무료시 반품배송비 부과방법 : 왕복(편도x2)
+반품/교환 기준
+상품 수령 후 7일 이내에 신청하실 수 있습니다. 단, 제품이 표시·광고 내용과 다르거나, 계약과 다르게 이행된 경우는 제품 수령일부터 3개월 이내, 그 사실을 안 날 또는 알 수 있었던 날부터 30일 이내에 교환/반품이 가능합니다.
+11번가 지식재산권보호센터
+:   11번가는 지식재산권 보호를 위해
+노력하고 있습니다. 본인의 지식
+재산권을 침해한 상품이 있을 시
+신고가 가능합니다."""
+
+
+def test_strip_elevenst_boilerplate_removes_known_chrome_lines():
+    cleaned = search_module._strip_elevenst_boilerplate(_ELEVENST_RAW_SAMPLE)
+
+    for chrome in ("판매자만족", "응답률", "판매량", "브랜드패션", "* 찜 완료", "최대 적립 포인트"):
+        assert chrome not in cleaned.split("\n")
+
+
+def test_strip_elevenst_boilerplate_keeps_price_and_product_name():
+    cleaned = search_module._strip_elevenst_boilerplate(_ELEVENST_RAW_SAMPLE)
+
+    assert "N 광동제약 옥수수수염차 340mLx20EA" in cleaned
+    assert ":   **24,300 원**" in cleaned
+
+
+def test_strip_elevenst_boilerplate_removes_legal_and_points_paragraphs():
+    cleaned = search_module._strip_elevenst_boilerplate(_ELEVENST_RAW_SAMPLE)
+
+    assert "구매확정 시, 0.5% 자동 적립" not in cleaned
+    assert "지식재산권 보호를 위해" not in cleaned
+    assert "상품 수령 후 7일 이내에 신청하실 수 있습니다" not in cleaned
+
+
+def test_strip_elevenst_boilerplate_passes_through_unknown_text_unchanged():
+    text = "이것은 임의의 상품 설명 텍스트입니다.\n가격은 12,900원입니다."
+
+    cleaned = search_module._strip_elevenst_boilerplate(text)
+
+    assert "이것은 임의의 상품 설명 텍스트입니다." in cleaned
+    assert "가격은 12,900원입니다." in cleaned
+
+
+# -- app.search._strip_boilerplate (도메인 분기) --------------------------------
+
+
+def test_strip_boilerplate_dispatches_by_domain():
+    danawa_text = "로그인\n상세 스펙\n:   실제 스펙"
+    elevenst_text = "판매자만족\nN 실제 상품명"
+    unknown_text = "로그인\n알 수 없는 사이트의 실제 내용"
+
+    assert "로그인" not in search_module._strip_boilerplate(
+        danawa_text, "https://prod.danawa.com/info?pcode=1"
+    )
+    assert "판매자만족" not in search_module._strip_boilerplate(
+        elevenst_text, "https://www.11st.co.kr/products/123"
+    )
+    # 모르는 도메인은 그대로 통과 - 잘못 걸러내는 것보다 안전한 쪽
+    assert search_module._strip_boilerplate(unknown_text, "https://example.com/x") == unknown_text
+
+
 def test_search_coupang_scopes_tavily_to_coupang_domain(monkeypatch):
     captured: dict = {}
 
