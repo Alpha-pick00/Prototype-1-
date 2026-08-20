@@ -5,12 +5,11 @@ from typing import Any, AsyncIterator
 
 from fetchers import elevenst
 
-from . import category
 from . import embeddings
 from . import facet_cache
 from . import llm_cache
 from . import price_table as price_table_module
-from .agents import deepseek, gpt
+from .agents import deepseek, gpt, groq
 from .intent import is_non_product_chitchat, needs_clarification
 from .schemas import (
     BrandOption,
@@ -60,6 +59,25 @@ async def _search_candidates(query: str, base_query: str | None) -> list[elevens
     return await elevenst.search_elevenst(query, limit=10)
 
 
+async def _search_with_query_variants(query: str) -> list[elevenst.ElevenstSearchItem]:
+    """1차 검색이 관련 상품을 하나도 못 찾았을 때만 쓰는 폴백(2026-08-20,
+    "2프로랑 2%랑 이프로랑 다 똑같은 제품인데 상품 매핑이 안되는 문제") -
+    11번가 검색 엔진이 사용자 표기("2프로")와 카탈로그 실제 표기("이프로")가
+    달라 관련 상품을 하나도 못 찾을 수 있다(실측: "2프로"로 검색하면 "프로"
+    (Pro)가 붙은 카메라 삼각대·어댑터만 나옴). Groq이 제안한 대안 표기로
+    하나씩 재검색해 관련 상품이 나오는 첫 표기를 쓴다 - 관련성 판정도 원래
+    질의가 아니라 그 대안 표기 기준으로 한다(원래 질의로는 애초에 텍스트가
+    안 겹쳐 항상 실패하므로 - 실측: "2프로"↔"이프로 ... 복숭아" 유사도
+    13점, "이프로"↔같은 상품 100점)."""
+    variants = await groq.generate_query_variants(query)
+    for variant in variants:
+        items = await elevenst.search_elevenst(variant, limit=10)
+        relevant = [it for it in items if price_table_module._product_name_matches(variant, it["product_name"])]
+        if relevant:
+            return relevant
+    return []
+
+
 async def run_elevenst_only_debate(query: str, base_query: str | None = None) -> DecideResponse:
     """11번가 오픈 API(ProductSearch)로 검색한다(_search_candidates - base_query가
     있으면 재검색 대신 구조적 필터링). _product_name_matches로 질의와 실제로
@@ -67,9 +85,12 @@ async def run_elevenst_only_debate(query: str, base_query: str | None = None) ->
     정렬한 뒤(_rank_by_relevance) 그 순서 그대로 proposals에 담아 "관련 상품"
     목록으로 노출한다. 최종 추천은 추천 Agent(gpt.recommend_best, 가격뿐
     아니라 리뷰·구매만족도까지 고려)가 고르고, 실패하면(키 없음·API 오류)
-    최저가 규칙 기반으로 폴백한다."""
+    최저가 규칙 기반으로 폴백한다. 관련 상품을 하나도 못 찾으면 Groq이
+    제안한 대안 표기로 재검색한다(_search_with_query_variants)."""
     items = await _search_candidates(query, base_query)
     relevant = [it for it in items if price_table_module._product_name_matches(query, it["product_name"])]
+    if not relevant:
+        relevant = await _search_with_query_variants(query)
     if not relevant:
         raise RuntimeError(f"11번가에서 '{query}'에 대해 관련성 있는 상품을 찾지 못했다.")
 
@@ -594,23 +615,18 @@ async def check_clarify_facets(
     items = await price_table_module._search_elevenst_items(
         search_query, limit=price_table_module.CLARIFY_SEARCH_LIMIT
     )
-    # items가 비었으면(검색 실패/키 미설정) 카테고리 집계도 같은 이유로
-    # 비어있을 것이므로 굳이 다시 부르지 않는다.
-    categories = await price_table_module._search_elevenst_categories(search_query) if items else []
 
-    # 카테고리 축은 사용자에게 고르라고 묻지 않는다(2026-08-20 재설계, "카테고리는
-    # 선택안하고 쿼리를 기반으로 Groq이 자동으로 매핑할 수 있도록 해줘") - 11번가
-    # 오픈 API는 dispCtgrNo를 ProductSearch에 넘겨도 서버 쪽에서 실제로
-    # 필터링해주지 않고(실측 확인 - TotalCount가 무시하고 그대로 나옴), 카테고리
-    # 이름("과자/간식" 등)은 다나와의 대분류/중분류와 달리 상품명 텍스트에 거의
-    # 등장하지 않아 _filter_items_by_extra_terms 같은 순수 로컬 필터링도 통하지
-    # 않는다 - 그래서 애초에 "카테고리를 고르면 표본을 좁힌다"는 전제 자체가
-    # 성립하지 않는다. 대신 category.classify_category(Groq, 실측
-    # breakdown(categories) 중 하나를 즉시 고름)로 자동 분류해 detected_category에
-    # 정보성으로만 담는다 - 클릭 옵션이 아니다. DeepSeek이 자체적으로 "카테고리"
-    # 라벨 facet을 뽑아왔더라도(_extract_facets) 여기서 걸러낸다 - 이제 카테고리는
-    # 어디서도 되묻지 않는다. 브랜드/모델/용량처럼 값이 상품명에 실제로 등장하는
-    # 다른 축들이 아래 _filter_items_by_extra_terms로 표본을 구조적으로 좁혀
+    # 카테고리 축은 아예 다루지 않는다(2026-08-20, "제품분류가 굳이 필요해?" -
+    # 실측 카테고리 집계를 Groq으로 자동 분류해봤지만 그 결과를 쓰는 곳이
+    # 어디에도 없어 API 호출만 하나 느는 죽은 기능이었다). 11번가 오픈 API는
+    # dispCtgrNo를 ProductSearch에 넘겨도 서버 쪽에서 실제로 필터링해주지
+    # 않고(실측 확인 - TotalCount가 무시하고 그대로 나옴), 카테고리 이름
+    # ("과자/간식" 등)은 상품명 텍스트에 거의 등장하지 않아 구조적 로컬
+    # 필터링도 통하지 않는다 - "카테고리를 고르면 표본을 좁힌다"는 전제
+    # 자체가 성립하지 않는다. 그래서 카테고리 집계 API도 안 부르고, DeepSeek이
+    # 자체적으로 "카테고리" 라벨 facet을 뽑아왔더라도(_extract_facets) 그냥
+    # 걸러낸다. 브랜드/모델/용량처럼 값이 상품명에 실제로 등장하는 다른
+    # 축들이 아래 _filter_items_by_extra_terms로 표본을 구조적으로 좁혀
     # 나간다(순서는 _facet_sort_key가 매 라운드 표본 기준으로 동적으로 정한다).
     if base_query and base_query.strip() and base_query.strip() != query.strip():
         items = _filter_items_by_extra_terms(items, query, base_query)
@@ -618,10 +634,7 @@ async def check_clarify_facets(
     facets = await _extract_facets(query, names, persona)
     facets = [f for f in facets if f.label != "카테고리"]
     facets = _strip_query_answered_options(query, facets)
-    detected_category = await category.classify_category(query, [g["name"] for g in categories])
-    return ClarifyResponse(
-        query=query, options=ClarifyOptions(facets=facets, detected_category=detected_category)
-    )
+    return ClarifyResponse(query=query, options=ClarifyOptions(facets=facets))
 
 
 def _facet_options_for_query(query: str, facet: ClarifyFacet) -> list[str]:

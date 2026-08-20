@@ -99,9 +99,6 @@ export interface ClarifyOptions {
   volumes: string[];
   quantities: string[];
   facets: ClarifyFacet[];
-  // 사용자에게 고르라고 묻지 않고 Groq이 질의만 보고 자동으로 매핑한 카테고리
-  // (app.category.classify_category) - 클릭 옵션이 아니라 정보성 값이다.
-  detected_category: string | null;
 }
 
 export interface ClarifyResponse {

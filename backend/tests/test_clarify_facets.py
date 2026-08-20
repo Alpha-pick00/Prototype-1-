@@ -830,62 +830,35 @@ def test_check_clarify_facets_orders_phone_model_facet_first(monkeypatch):
     assert result.options.facets[0].label == "핸드폰 기종"
 
 
-# -- 다나와 실측 카테고리 집계로 "카테고리" facet을 채우고, 선택된 카테고리로
-# 표본을 다시 좁히는 기능(2026-08-18 사용자 리포트: "샤오미로 검색하면 AI
-# 상세검색 카테고리에 휴대폰이 안 나온다" / "카테고리를 고르면 모델도, 모델을
-# 고르면 용량도 그에 맞게 좁혀져야지 - 안 그러면 공기청정기 · 미 패드5처럼
-# 존재하지 않는 상품으로 매핑돼") -------------------------------------------
-
-_XIAOMI_CATEGORIES = [
-    {
-        "name": "태블릿/휴대폰",
-        "count": 202586,
-        "subcategories": [
-            {"name": "휴대폰 주변용품", "count": 77372},
-            {"name": "휴대폰", "count": 20469},
-        ],
-    },
-    {
-        "name": "생활가전",
-        "count": 56381,
-        "subcategories": [{"name": "청소기", "count": 47851}],
-    },
-]
+# -- "카테고리" facet은 절대 되묻지 않는다(2026-08-20, "제품분류가 굳이
+# 필요해?") ------------------------------------------------------------------
 
 
-def test_check_clarify_facets_never_asks_category_but_auto_detects_it(monkeypatch):
-    """2026-08-20 재설계("카테고리는 선택안하고 쿼리를 기반으로 Groq이 자동으로
-    매핑할 수 있도록 해줘") - "카테고리" facet은 절대 클릭 옵션으로 뜨지 않는다
-    (DeepSeek이 자체적으로 "카테고리" 라벨을 뽑아왔어도 걸러낸다). 대신
-    Groq(app.category.classify_category)이 실측 breakdown 중 하나를 골라
-    options.detected_category에 정보성으로만 담는다."""
+def test_check_clarify_facets_never_asks_category(monkeypatch):
+    """2026-08-20 재설계("제품분류가 굳이 필요해?" - 카테고리 축은 아예 다루지
+    않는다, 실측 breakdown API도 안 부르고 자동 분류도 안 한다: 어차피
+    표본을 좁히는 데도, 결과를 쓰는 곳에도 쓰이지 않는 죽은 기능이었다) -
+    DeepSeek이 자체적으로 "카테고리" 라벨 facet을 뽑아왔어도 걸러낸다."""
 
     async def _fake_search(query, limit=90):
         return [{"pcode": "1", "product_name": "샤오미 미지아 선풍기", "total_mall_count": None}]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
 
-    async def _fake_search_categories(query):
-        return _XIAOMI_CATEGORIES
+    async def _boom_categories(query):
+        raise AssertionError("카테고리 축을 안 쓰기로 했는데 search_categories가 호출됐다")
 
-    monkeypatch.setattr("fetchers.elevenst.search_categories", _fake_search_categories)
+    monkeypatch.setattr("fetchers.elevenst.search_categories", _boom_categories)
 
     async def _fake_extract_facets(query, names):
         return [ClarifyFacet(label="카테고리", options=["엉뚱한값"]), ClarifyFacet(label="모델", options=names)]
 
     monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
 
-    async def _fake_classify(query, category_names):
-        assert category_names == [g["name"] for g in _XIAOMI_CATEGORIES]
-        return "태블릿/휴대폰"
-
-    monkeypatch.setattr("app.category.classify_category", _fake_classify)
-
     result = asyncio.run(check_clarify_facets("샤오미"))
 
     by_label = {f.label: f for f in result.options.facets}
     assert "카테고리" not in by_label
-    assert result.options.detected_category == "태블릿/휴대폰"
 
 
 def test_check_clarify_facets_does_not_research_when_category_already_selected(monkeypatch):
@@ -902,11 +875,6 @@ def test_check_clarify_facets_does_not_research_when_category_already_selected(m
         return [{"pcode": "1", "product_name": "샤오미 미지아 선풍기", "total_mall_count": None}]
 
     monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
-
-    async def _fake_search_categories(query):
-        return _XIAOMI_CATEGORIES
-
-    monkeypatch.setattr("fetchers.elevenst.search_categories", _fake_search_categories)
 
     async def _fake_extract_facets(query, names):
         return [ClarifyFacet(label="모델", options=names)]
