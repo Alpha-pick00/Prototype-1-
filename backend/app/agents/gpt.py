@@ -1,7 +1,7 @@
 from openai import AsyncOpenAI
 
 from ..config import settings
-from .base import build_clarify_ask_prompt, parse_json_object
+from .base import build_clarify_ask_prompt, build_recommend_prompt, parse_json_object
 
 # 이 모듈이 담당하는 에이전트 슬롯은 스키마/프론트엔드/테스트 전반에서
 # agent="gpt"로 식별된다(파일명·함수명도 그대로) - 하지만 실제로 호출하는
@@ -42,3 +42,26 @@ async def generate_clarify_question(query: str, options: list[str]) -> str:
         return data.get("message") or _CLARIFY_ASK_FALLBACK
     except Exception:
         return _CLARIFY_ASK_FALLBACK
+
+
+async def recommend_best(query: str, candidates: list[dict]) -> tuple[int, str] | None:
+    """11번가 검증 후보(app.debate.run_elevenst_only_debate) 중 가장 추천할
+    만한 것을 LLM이 고른다 - 가격만이 아니라 리뷰 수/구매만족도까지 본다.
+    실패(키 없음·API 오류·범위 밖 index)하면 None - 호출부가 최저가 규칙
+    기반으로 폴백한다."""
+    if not candidates:
+        return None
+    try:
+        client = _client()
+        response = await client.chat.completions.create(
+            model=settings.qwen_model,
+            messages=[{"role": "user", "content": build_recommend_prompt(query, candidates)}],
+            response_format={"type": "json_object"},
+        )
+        data = parse_json_object(response.choices[0].message.content or "")
+        index = int(data.get("index"))
+        if not (0 <= index < len(candidates)):
+            return None
+        return index, str(data.get("reasoning") or "").strip()
+    except Exception:
+        return None

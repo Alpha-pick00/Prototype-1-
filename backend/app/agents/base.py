@@ -17,6 +17,29 @@ def build_clarify_ask_prompt(query: str, options: list[str]) -> str:
     return f"{CLARIFY_ASK_INSTRUCTIONS}\n\n사용자 질의: {query}\n\n후보:\n{options_block}"
 
 
+RECOMMEND_INSTRUCTIONS = (
+    "당신은 검증된 쇼핑 후보 중 사용자에게 가장 추천할 만한 상품 하나를 고르는 "
+    "에이전트입니다. 아래 후보는 전부 실제 검색으로 존재가 확인된 상품입니다 "
+    "(지어낸 상품이 아닙니다) - 이 중에서만 고르세요. 가격뿐 아니라 리뷰 수·"
+    "구매만족도·판매자를 함께 보고 판단하되, 가격 차이가 크지 않은 후보끼리는 "
+    "리뷰가 많고 구매만족도가 높은 쪽을 우선하세요. 후보는 이미 질의와의 "
+    "관련도 순으로 정렬돼 있습니다. "
+    "반드시 아래 후보 목록의 index 중 하나를 골라 JSON으로만 답하세요. 다른 "
+    "텍스트나 코드펜스를 덧붙이지 마세요.\n\n"
+    '{"index": 0, "reasoning": "..."}'
+)
+
+
+def build_recommend_prompt(query: str, candidates: list[dict]) -> str:
+    lines = [
+        f"[{i}] {c['product_name']} / {c['price_krw']:,}원 / 판매자: {c['seller']} / "
+        f"리뷰 {c.get('review_count')}건 / 구매만족도 {c.get('buy_satisfy')}"
+        for i, c in enumerate(candidates)
+    ]
+    candidates_block = "\n".join(lines) or "(후보 없음)"
+    return f"{RECOMMEND_INSTRUCTIONS}\n\n사용자 질의: {query}\n\n후보:\n{candidates_block}"
+
+
 FACET_CLARIFY_INSTRUCTIONS = (
     "당신은 애매한 쇼핑 검색어를 몇 가지 기준(facet)으로 좁혀나가도록 돕는 에이전트입니다. "
     "사용자 질의가 여러 종류의 서로 다른 상품을 아우르는 넓은 카테고리 검색어라면"

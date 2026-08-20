@@ -5,9 +5,11 @@ from typing import Any, AsyncIterator
 
 from fetchers import elevenst
 
+from . import embeddings
 from . import facet_cache
+from . import llm_cache
 from . import price_table as price_table_module
-from .agents import deepseek
+from .agents import deepseek, gpt
 from .intent import is_non_product_chitchat, needs_clarification
 from .schemas import (
     BrandOption,
@@ -23,25 +25,57 @@ from .schemas import (
 logger = logging.getLogger(__name__)
 
 
+async def _rank_by_relevance(
+    query: str, items: list[elevenst.ElevenstSearchItem]
+) -> list[elevenst.ElevenstSearchItem]:
+    """Qwen 임베딩 코사인 유사도로 관련도 내림차순 정렬한다 - "함께 추천"되는
+    관련상품 목록(proposals)의 순서이자, 추천 Agent에게 넘기는 후보 순서다.
+    임베딩이 실패하면(키 없음·API 오류) 원래 순서(11번가가 준 순서) 그대로
+    돌려준다 - 정렬 실패가 검색 자체를 막으면 안 된다."""
+    names = [it["product_name"] for it in items]
+    vectors = await embeddings.embed([query, *names])
+    if vectors is None:
+        return items
+    query_vec, *item_vecs = vectors
+    scored = sorted(
+        zip(items, item_vecs), key=lambda pair: embeddings.cosine_similarity(query_vec, pair[1]), reverse=True
+    )
+    return [it for it, _ in scored]
+
+
 async def run_elevenst_only_debate(query: str) -> DecideResponse:
-    """11번가 오픈 API(ProductSearch)로 검색해 규칙 기반으로 최종 추천을
-    고른다 - LLM 호출 없이 구조화 데이터만 쓴다. 검색 결과 각각에
-    _product_name_matches(query, product_name)를 적용해 질의와 실제로 맞는
-    상품만 후보로 남긴 뒤 그중 최저가를 고른다 - API 자체의 정렬(sortCd=A)이
-    실측상 항상 가격 오름차순은 아니었어서(2026-08-20 실측: 정렬 안 됨 확인)
-    클라이언트에서 직접 최저가를 고른다."""
+    """11번가 오픈 API(ProductSearch)로 검색한다. _product_name_matches로
+    질의와 실제로 맞는 상품만 후보(검증된 후보군)로 남기고, Qwen 임베딩으로
+    관련도순 정렬한 뒤(_rank_by_relevance) 그 순서 그대로 proposals에 담아
+    "관련 상품" 목록으로 노출한다. 최종 추천은 추천 Agent(gpt.recommend_best,
+    가격뿐 아니라 리뷰·구매만족도까지 고려)가 고르고, 실패하면(키 없음·API
+    오류) 최저가 규칙 기반으로 폴백한다."""
     items = await elevenst.search_elevenst(query, limit=10)
     relevant = [it for it in items if price_table_module._product_name_matches(query, it["product_name"])]
     if not relevant:
         raise RuntimeError(f"11번가에서 '{query}'에 대해 관련성 있는 상품을 찾지 못했다.")
 
-    best = min(relevant, key=lambda it: it["price_krw"])
+    ranked = await _rank_by_relevance(query, relevant)
+
+    recommended = await gpt.recommend_best(query, ranked)
+    if recommended is not None:
+        index, llm_reasoning = recommended
+        best = ranked[index]
+        reasoning = (
+            f"11번가 실측 검증 후보 중 추천 Agent(Qwen)가 선택 - {llm_reasoning}"
+            if llm_reasoning
+            else "11번가 실측 검증 후보 중 추천 Agent(Qwen)가 선택"
+        )
+    else:
+        best = min(ranked, key=lambda it: it["price_krw"])
+        reasoning = "11번가 오픈 API(ProductSearch) 실측 - 추천 Agent 응답 실패로 최저가 규칙 기반 선택"
+
     decision = Decision(
         product_name=best["product_name"],
         price=f"{best['price_krw']:,}원",
         retailer=best["seller"],
         url=best["url"],
-        reasoning="11번가 오픈 API(ProductSearch) 실측 - LLM 미사용, 구조화 데이터 기반 최저가 선택",
+        reasoning=reasoning,
         chosen_agent="elevenst",
         price_source="elevenst_offer",
     )
@@ -52,10 +86,10 @@ async def run_elevenst_only_debate(query: str) -> DecideResponse:
             price=f"{it['price_krw']:,}원",
             retailer=it["seller"],
             url=it["url"],
-            reasoning="11번가 오픈 API 검색 결과",
+            reasoning="11번가 오픈 API 검증 결과 (관련도순 - 함께 볼만한 상품)",
             verified=True,
         )
-        for it in relevant
+        for it in ranked
     ]
     return DecideResponse(query=query, proposals=proposals, decision=decision)
 
@@ -421,19 +455,34 @@ def _apply_persona_ordering(facets: list[ClarifyFacet], persona: dict[str, str])
     return reordered
 
 
+_FACET_CACHE_NAMESPACE = "clarify_facets"
+
+
 async def _extract_facets(
     query: str, names: list[str], persona: dict[str, str] | None = None
 ) -> list[ClarifyFacet]:
     """상품명 목록(출처 무관)에서 facet을 뽑는 공유 파이프라인 -
-    check_clarify_facets(11번가 직접 검색)이 쓴다."""
-    facets = await deepseek.extract_facets_from_names(query, names)
-    facets = await _enrich_facets_per_brand(facets, names, query)
-    facets = await _enrich_device_models_by_ecosystem(facets, names, query)
-    facets = _attach_facet_crossfilter(facets, names)
-    incidence = _build_facet_value_incidence(facets, names)
-    facets = sorted(facets, key=lambda f: _facet_sort_key(f, incidence))
-    facets = _apply_persona_ordering(facets, persona or {})
-    return facets
+    check_clarify_facets(11번가 직접 검색)이 쓴다. 이 안에서만 최대 1(메인) +
+    _MAX_BRAND_ENRICH_FANOUT(브랜드별) + 1(기종 보강) 번의 LLM 호출이 나갈 수
+    있어 - 같은 질의가 반복되면(인기 검색어) llm_cache(Supabase KV+시맨틱)로
+    건너뛴다. persona는 캐시된 facets 순서에 매 호출 새로 반영하므로(사용자마다
+    다름) 캐시 키에는 넣지 않는다 - 캐시는 query 텍스트에만 의존한다."""
+    cached = await llm_cache.exact_get(
+        _FACET_CACHE_NAMESPACE, query
+    ) or await llm_cache.semantic_get(_FACET_CACHE_NAMESPACE, query)
+    if cached is not None:
+        facets = [ClarifyFacet(**f) for f in cached["facets"]]
+    else:
+        facets = await deepseek.extract_facets_from_names(query, names)
+        facets = await _enrich_facets_per_brand(facets, names, query)
+        facets = await _enrich_device_models_by_ecosystem(facets, names, query)
+        facets = _attach_facet_crossfilter(facets, names)
+        incidence = _build_facet_value_incidence(facets, names)
+        facets = sorted(facets, key=lambda f: _facet_sort_key(f, incidence))
+        payload = {"facets": [f.model_dump() for f in facets]}
+        await llm_cache.exact_set(_FACET_CACHE_NAMESPACE, query, payload)
+        await llm_cache.semantic_set(_FACET_CACHE_NAMESPACE, query, payload)
+    return _apply_persona_ordering(facets, persona or {})
 
 
 def _normalize_for_query_match(text: str) -> str:

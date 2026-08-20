@@ -34,6 +34,12 @@ class Settings:
 
     google_vision_api_key: str | None = os.environ.get("GOOGLE_VISION_API_KEY")
 
+    # LLM 응답 캐시(app/llm_cache.py) 저장소 - Supabase 프로젝트 URL + secret
+    # key(서버 쓰기용, RLS 우회). 둘 다 없으면 캐시가 안전하게 no-op(항상
+    # 미스)로 동작한다 - elevenst_api_key와 같은 패턴.
+    supabase_url: str | None = os.environ.get("SUPABASE_URL")
+    supabase_key: str | None = os.environ.get("SUPABASE_KEY")
+
     # 소셜 로그인 (Google Client ID는 프론트엔드 VITE_GOOGLE_CLIENT_ID로만 쓰임 —
     # access_token으로 유저 정보를 조회하는 방식이라 백엔드는 client id가 필요 없다)
     kakao_client_id: str | None = os.environ.get("KAKAO_CLIENT_ID")
