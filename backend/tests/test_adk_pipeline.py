@@ -24,6 +24,7 @@ from app.adk_pipeline import (
     _skip_challenge_if_all_structured,
     _skip_judge_if_single_candidate,
     _skip_propose_if_elevenst_grounded,
+    _skip_refine_unless_conversational,
     _urls_needing_challenge_extract,
     _urls_to_extract,
     _verify_relaxed_verdict,
@@ -245,6 +246,45 @@ def test_on_refine_model_error_returns_none_to_propagate_failure():
     result = _on_refine_model_error(_StubCallbackContext("refine"), None, RuntimeError("모델 호출 실패"))
 
     assert result is None
+
+
+# --- _skip_refine_unless_conversational (refine 조건부 재도입, 2026-08-20) -----
+# ("'안녕 나 컵을 사고싶어' 이런식으로 쿼리를 입력하면 지금 LLM이 못
+# 알아듣거든" 리포트로 refine을 다시 넣되, looks_conversational_query에
+# 걸리는 질의에만 조건부로 돌게 좁혔다)
+
+
+def test_skip_refine_none_when_query_is_conversational():
+    """대화체 질의는 건너뛰지 않고 실제 정제(Groq)를 태워야 한다."""
+    ctx = _FakeCallbackContext({"original_query": "안녕 나 컵을 사고싶어"})
+
+    assert _skip_refine_unless_conversational(ctx, None) is None
+
+
+def test_skip_refine_returns_original_query_when_already_specific():
+    ctx = _FakeCallbackContext({"original_query": "삼성전자 갤럭시 버즈3 프로"})
+
+    response = _skip_refine_unless_conversational(ctx, None)
+
+    assert response is not None
+    assert json.loads(response.content.parts[0].text)["query"] == "삼성전자 갤럭시 버즈3 프로"
+
+
+def test_skip_refine_returns_original_query_for_short_bare_query():
+    """"음료수"처럼 이미 짧고 깨끗한 검색어는 대화체가 아니므로 건너뛴다 -
+    매번 LLM을 태우면 이번 세션에서 줄인 호출 수가 다시 늘어난다."""
+    ctx = _FakeCallbackContext({"original_query": "음료수"})
+
+    response = _skip_refine_unless_conversational(ctx, None)
+
+    assert response is not None
+    assert json.loads(response.content.parts[0].text)["query"] == "음료수"
+
+
+def test_skip_refine_none_when_original_query_missing():
+    ctx = _FakeCallbackContext({})
+
+    assert _skip_refine_unless_conversational(ctx, None) is None
 
 
 # --- _apply_challenge ------------------------------------------------------
@@ -1336,6 +1376,17 @@ def test_build_pipeline_runs_elevenst_before_propose_and_propose_has_only_deepse
 
     propose = next(a for a in pipeline.sub_agents if a.name == "propose")
     assert [a.name for a in propose.sub_agents] == ["deepseek", "coupang_check", "naver_check"]
+
+
+def test_build_pipeline_reinstates_refine_as_first_stage():
+    """(2026-08-20) refine을 조건부로 다시 넣었다 - "search"보다 먼저 돌아야
+    _refined_query_text()가 정제된 질의를 뒤이은 모든 단계(search 포함)에
+    반영할 수 있다."""
+    pipeline = _build_pipeline()
+
+    top_level = [a.name for a in pipeline.sub_agents]
+    assert top_level[0] == "refine"
+    assert top_level.index("refine") < top_level.index("search")
 
 
 # --- relaxed fallback 하드닝(2026-08-16, "구매링크를 안띄워주는거야" 버그의 근본 -----

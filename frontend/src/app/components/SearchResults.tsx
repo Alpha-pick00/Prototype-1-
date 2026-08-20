@@ -80,7 +80,7 @@ const BrandOptionRow = ({ option }: { option: BrandOption }) => (
 const STAGE_LABEL: Record<DecideStage, string> = {
   refining: '질의를 다듬고 있습니다',
   searching: '11번가에서 검색하고 있습니다',
-  proposing: 'Qwen · Groq · DeepSeek가 후보를 찾고 있습니다',
+  proposing: '상품 후보를 찾고 있습니다',
   challenging: 'DeepSeek가 근거를 검증하고 있습니다',
   judging: 'Groq가 근거를 비교해 최종 추천을 고르고 있습니다',
 };

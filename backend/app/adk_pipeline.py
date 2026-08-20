@@ -8,11 +8,16 @@ run()/run_stream()을 호출한다. (제안 슬롯 이름은 "gpt"/"groq" - "gpt
 실제로는 Qwen이 돌지만 리네임 비용이 커서 식별자를 그대로 뒀고, "groq" 슬롯은
 2026-08-18에 실제 쓰는 모델명으로 리네임했다 - 원래 이름은 "gemini"였다.)
 
-(2026-08-20) 정제(refine, Groq) 단계는 파이프라인에서 뺐다("쿼리 재질의
-없애고") - 원본 질의를 그대로 검색에 쓴다. 검색 백엔드도 Tavily+다나와에서
-11번가 오픈API로 바꿨다("다나와를 폐기하고 11번가 쪽으로") - 다나와 관련
-코드(_DanawaFetchNode, fetchers/danawa*.py 등)는 참고용으로 파일에 남아있지만
-이 메인 파이프라인에서는 더 이상 안 쓴다.
+(2026-08-20) 정제(refine, Groq) 단계를 한 번 뺐다가("쿼리 재질의 없애고")
+같은 날 다시 넣었다("'안녕 나 컵을 사고싶어'... 지금 LLM이 못 알아듣거든" -
+대화체/인사말이 섞인 질의가 정제 없이 그대로 11번가 keyword 검색에 들어가면
+검색·그라운딩이 둘 다 실패했다). 다만 예전처럼 매 질의마다 도는 게 아니라
+looks_conversational_query()에 걸리는 질의에만 조건부로 돈다
+(_skip_refine_unless_conversational) - 이미 짧고 깨끗한 검색어는 계속
+건너뛴다. 검색 백엔드도 Tavily+다나와에서 11번가 오픈API로 바꿨다("다나와를
+폐기하고 11번가 쪽으로") - 다나와 관련 코드(_DanawaFetchNode, fetchers/
+danawa*.py 등)는 참고용으로 파일에 남아있지만 이 메인 파이프라인에서는 더
+이상 안 쓴다.
 
 (2026-08-20, "3개 LLM까지 필요없다") propose의 gpt(Qwen)/groq 슬롯도 뺐다 -
 검색이 11번가 하나뿐이라 세 LLM이 elevenst 구조화 데이터와 완전히 같은
@@ -55,7 +60,7 @@ from .category import classify_category
 from .agents import deepseek as deepseek_module
 from .agents import gpt as gpt_module
 from .agents import judge as judge_module
-from .intent import needs_clarification
+from .intent import looks_conversational_query
 from .agents.base import (
     NO_CANDIDATE_ERROR,
     build_challenge_prompt,
@@ -790,18 +795,19 @@ def _model_error_fallback_response(text: str) -> LlmResponse:
     return LlmResponse(content=types.Content(role="model", parts=[types.Part(text=text)]))
 
 
-def _skip_refine_if_already_specific(callback_context, llm_request) -> LlmResponse | None:
-    """정제(refine)는 파이프라인에서 검색이 시작되기 전에 걸리는 첫 LLM 왕복이라,
-    여기를 건너뛰면 그만큼 전체 응답 지연이 그대로 줄어든다(사용자 요청,
-    2026-08-15: "순차단계 줄이자"). REFINE_QUERY_INSTRUCTIONS 자체가 "질의가
-    이미 구체적이면 그대로 반환하라"고 하므로, 그 판단을 매번 모델에 왕복해
-    묻는 대신 이미 있는 needs_clarification() 휴리스틱(브랜드/스펙 없이 짧은
-    질의나 "사고싶어"류 모호한 구매의도 문구만 True)으로 로컬에서 먼저 걸러
-    낸다. 애매하면(True) 여기서 손대지 않고 실제 정제(Groq)를 그대로 태운다 -
-    오탐(정제가 실제로 필요한데 건너뜀)의 대가가 "약간 덜 다듬어진 검색어"
-    정도라 위험하지 않다."""
+def _skip_refine_unless_conversational(callback_context, llm_request) -> LlmResponse | None:
+    """정제(refine)는 2026-08-20("쿼리 재질의 없애고")에 한 번 파이프라인에서
+    완전히 빠졌었다 - "안녕 나 컵을 사고싶어"처럼 인사말/대화체로 감싼 질의가
+    정제 없이 그대로 11번가 API keyword로 들어가면서 검색도 그라운딩도 실패하는
+    회귀가 드러나(같은 날 사용자 리포트) 다시 넣었다. 다만 예전처럼
+    needs_clarification() 전체(짧고 깨끗한 검색어 "음료수"까지 포함)를 기준으로
+    삼지 않는다 - 그건 정제가 필요 없는 대부분의 짧은 검색어까지 매번 LLM
+    왕복을 태워, 이번 세션에서 줄인 LLM 호출 수를 도로 늘린다. 대신
+    looks_conversational_query()로 범위를 좁혀, 정말 "인사말/대화체 문장에 진짜
+    검색어가 섞여 있는" 경우에만 정제를 태운다 - 그 외(이미 짧고 깨끗한 검색어,
+    이미 구체적인 검색어)는 건너뛴다."""
     original_query = callback_context.state.get("original_query", "")
-    if not original_query or needs_clarification(original_query):
+    if not original_query or looks_conversational_query(original_query):
         return None
     fallback = RefinedQuery(query=original_query)
     return _model_error_fallback_response(fallback.model_dump_json())
@@ -896,7 +902,7 @@ def _build_refine_agent() -> LlmAgent:
         instruction=instruction,
         output_schema=RefinedQuery,
         output_key="refined_query",
-        before_model_callback=_skip_refine_if_already_specific,
+        before_model_callback=_skip_refine_unless_conversational,
         on_model_error_callback=_on_refine_model_error,
     )
 
@@ -1058,12 +1064,15 @@ def _build_pipeline() -> SequentialAgent:
     return SequentialAgent(
         name="single_debate_pipeline",
         sub_agents=[
-            # refine(질의 정제) 단계는 2026-08-20("쿼리 재질의 없애고")부터 뺐다 -
-            # _build_refine_agent()는 코드로 남아있지만 더 이상 파이프라인에
-            # 안 묶인다. _refined_query_text()가 이미 "refined_query가 없으면
-            # original_query로 폴백"하도록 짜여 있어(그 전에도 짧은 질의는
-            # _skip_refine_if_already_specific로 종종 건너뛰었다) 이 노드를
-            # 아예 빼도 다른 코드 변경이 필요 없다.
+            # refine(질의 정제) 단계는 2026-08-20("쿼리 재질의 없애고")에 한 번
+            # 뺐었는데, 같은 날 뒤이어 "'안녕 나 컵을 사고싶어' 이런식으로
+            # 쿼리를 입력하면 지금 LLM이 못 알아듣거든" 리포트로 회귀가 드러나
+            # 다시 넣었다 - 대화체/인사말이 섞인 질의는 정제 없이 그대로 11번가
+            # keyword 검색에 들어가면 검색·그라운딩이 둘 다 실패한다. 예전과
+            # 달리 매 질의마다 도는 게 아니라 looks_conversational_query()에
+            # 걸리는 질의에만 조건부로 돈다(_skip_refine_unless_conversational) -
+            # "음료수"처럼 이미 짧고 깨끗한 검색어는 여전히 이 단계를 건너뛴다.
+            _build_refine_agent(),
             _SearchNode(name="search"),
             # 11번가 공식 API 구조화 가격 - 2026-08-20("11번가 api를 구해서
             # 다나와를 폐기하고 11번가 쪽으로 방향을 틀려고") - 다나와 스크래핑의
@@ -1095,6 +1104,7 @@ def _get_runner() -> InMemoryRunner:
 
 
 _STAGE_AFTER = {
+    "refine": "searching",
     "search": "proposing",
     "filter_merge": "challenging",
     "apply_challenge": "judging",
@@ -1412,9 +1422,11 @@ async def run_stream(query: str, skip_clarify: bool = False) -> AsyncIterator[di
         app_name=_APP_NAME, user_id="anonymous", session_id=session_id, state={"original_query": query}
     )
 
-    # refine 단계가 빠져서(2026-08-20) 검색이 이제 진짜 첫 단계다 - "refining"
-    # 대신 바로 "searching"으로 시작한다.
-    yield {"type": "status", "stage": "searching"}
+    # refine이 다시 첫 단계다(2026-08-20, 조건부 재도입) - "refining" 상태를
+    # 먼저 보여준다. 대부분의 질의는 이 단계가 즉시 스킵되지만(_skip_refine_
+    # unless_conversational), LlmAgent 노드 자체는 여전히 이벤트를 내므로
+    # _STAGE_AFTER["refine"]="searching"이 정상적으로 다음 상태로 넘겨준다.
+    yield {"type": "status", "stage": "refining"}
 
     pipeline_failed = False
     gen = runner.run_async(
