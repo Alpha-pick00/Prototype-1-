@@ -6,9 +6,11 @@ from app.adk_pipeline import (
     _apply_challenge,
     _broad_web_fallback_search,
     _build_decision,
+    _build_pipeline,
     _build_style_guide,
     _comparison_page_listing_fallback,
     _danawa_tables_from_state,
+    _elevenst_grounded,
     _finalize_with_danawa,
     _format_price_krw,
     _is_danawa_product_url,
@@ -21,6 +23,7 @@ from app.adk_pipeline import (
     _relaxed_fallback_decision,
     _skip_challenge_if_all_structured,
     _skip_judge_if_single_candidate,
+    _skip_propose_if_elevenst_grounded,
     _urls_needing_challenge_extract,
     _urls_to_extract,
     _verify_relaxed_verdict,
@@ -1269,6 +1272,70 @@ def test_skip_challenge_none_when_only_candidate_is_llm_proposed():
     ctx = _FakeCallbackContext({"candidates": candidates})
 
     assert _skip_challenge_if_all_structured(ctx, None) is None
+
+
+# --- _elevenst_grounded (propose LLM/소프트 교차확인 게이팅의 공유 판정) -------
+# (2026-08-20, "3개 LLM까지 필요없다" - elevenst가 propose_parallel보다 먼저
+# 순차로 도는 별도 단계가 됐으므로, 그 결과가 state에 최종 반영된 뒤에만
+# 안전하게 읽을 수 있다는 전제 하에 이 판정을 공유한다)
+
+
+def test_elevenst_grounded_true_when_candidate_present():
+    assert _elevenst_grounded({"elevenst_raw": json.dumps([_raw_candidate("상품", 1000, ELEVENST_URL)])})
+
+
+def test_elevenst_grounded_false_when_empty_array():
+    assert _elevenst_grounded({"elevenst_raw": "[]"}) is False
+
+
+def test_elevenst_grounded_false_when_key_missing():
+    assert _elevenst_grounded({}) is False
+
+
+def test_elevenst_grounded_false_when_value_is_malformed_json():
+    assert _elevenst_grounded({"elevenst_raw": "not json"}) is False
+
+
+# --- _skip_propose_if_elevenst_grounded (propose 유일한 LLM을 조건부로만 호출) --
+
+
+def test_skip_propose_returns_empty_when_elevenst_already_grounded():
+    ctx = _FakeCallbackContext({"elevenst_raw": json.dumps([_raw_candidate("상품", 1000, ELEVENST_URL)])})
+
+    response = _skip_propose_if_elevenst_grounded(ctx, None)
+
+    assert response is not None
+    assert json.loads(response.content.parts[0].text) == []
+
+
+def test_skip_propose_none_when_elevenst_grounding_failed():
+    """elevenst_raw가 빈 배열(그라운딩 실패)이면 deepseek를 실제로 호출해
+    의미적 매칭 안전망을 태워야 한다."""
+    ctx = _FakeCallbackContext({"elevenst_raw": "[]"})
+
+    assert _skip_propose_if_elevenst_grounded(ctx, None) is None
+
+
+def test_skip_propose_none_when_elevenst_raw_missing():
+    ctx = _FakeCallbackContext({})
+
+    assert _skip_propose_if_elevenst_grounded(ctx, None) is None
+
+
+# --- _build_pipeline 구조 (2026-08-20 재구성 회귀 방지) -------------------------
+
+
+def test_build_pipeline_runs_elevenst_before_propose_and_propose_has_only_deepseek():
+    """gpt/groq propose 슬롯 제거 + elevenst를 propose_parallel보다 앞선 순차
+    단계로 옮긴 재구성이 실제로 배선됐는지 - _skip_propose_if_elevenst_grounded가
+    elevenst_raw를 신뢰성 있게 읽으려면 이 순서가 반드시 지켜져야 한다."""
+    pipeline = _build_pipeline()
+
+    top_level = [a.name for a in pipeline.sub_agents]
+    assert top_level.index("elevenst") < top_level.index("propose")
+
+    propose = next(a for a in pipeline.sub_agents if a.name == "propose")
+    assert [a.name for a in propose.sub_agents] == ["deepseek", "coupang_check", "naver_check"]
 
 
 # --- relaxed fallback 하드닝(2026-08-16, "구매링크를 안띄워주는거야" 버그의 근본 -----

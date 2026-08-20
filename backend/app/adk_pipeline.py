@@ -1,18 +1,26 @@
 """ADK(Google Agent Development Kit) 기반 역할 분리형 검색 파이프라인.
 
-검색(11번가) → 제안(Qwen·Groq·DeepSeek 병렬, 각자 최선 1개) →
-필터링+병합(fusion.dedup 재사용) → 검증(DeepSeek) → 매칭/합성 → 심사(Groq)
-순서로 실행된다 — `debate.py`의 run_single_debate/run_single_debate_stream이
-이 모듈의 run()/run_stream()을 호출한다. (제안 슬롯 이름은 "gpt"/"groq" -
-"gpt" 슬롯은 실제로는 Qwen이 돌지만 리네임 비용이 커서 식별자를 그대로 뒀고,
-"groq" 슬롯은 2026-08-18에 실제 쓰는 모델명으로 리네임했다 - 원래 이름은
-"gemini"였다.)
+검색(11번가) → 그라운딩(elevenst, 구조화·결정론적) → 제안(그라운딩 실패시만
+조건부 DeepSeek 1개 + 소프트 교차확인) → 필터링+병합(fusion.dedup 재사용) →
+검증(조건부 DeepSeek) → 매칭/합성 → 심사(조건부 Groq) 순서로 실행된다 —
+`debate.py`의 run_single_debate/run_single_debate_stream이 이 모듈의
+run()/run_stream()을 호출한다. (제안 슬롯 이름은 "gpt"/"groq" - "gpt" 슬롯은
+실제로는 Qwen이 돌지만 리네임 비용이 커서 식별자를 그대로 뒀고, "groq" 슬롯은
+2026-08-18에 실제 쓰는 모델명으로 리네임했다 - 원래 이름은 "gemini"였다.)
 
 (2026-08-20) 정제(refine, Groq) 단계는 파이프라인에서 뺐다("쿼리 재질의
 없애고") - 원본 질의를 그대로 검색에 쓴다. 검색 백엔드도 Tavily+다나와에서
 11번가 오픈API로 바꿨다("다나와를 폐기하고 11번가 쪽으로") - 다나와 관련
 코드(_DanawaFetchNode, fetchers/danawa*.py 등)는 참고용으로 파일에 남아있지만
 이 메인 파이프라인에서는 더 이상 안 쓴다.
+
+(2026-08-20, "3개 LLM까지 필요없다") propose의 gpt(Qwen)/groq 슬롯도 뺐다 -
+검색이 11번가 하나뿐이라 세 LLM이 elevenst 구조화 데이터와 완전히 같은
+목록을 다시 텍스트로 추측해 읽고 있었다. 이제 elevenst 그라운딩이 성공하면
+propose(deepseek 1개)·challenge(DeepSeek)·judge(Groq)·소프트 교차확인
+(coupang/naver)까지 전부 조건부로 건너뛴다 - "행복 경로"(대부분의 검색)는
+LLM 호출이 사실상 0번이고, elevenst 그라운딩이 실패했을 때만 deepseek가
+의미적 매칭 안전망으로 조건부 호출된다.
 
 SequentialAgent/ParallelAgent는 google-adk 2.6.3 기준 deprecated(대체 예정인
 Workflow가 아직 LlmAgent의 sub-agent로 못 쓰여 미완성 상태)이지만, 실제로는
@@ -348,19 +356,39 @@ def _pick_elevenst_candidate(query: str, result: elevenst_fetcher.SearchResult) 
     )
 
 
+def _elevenst_grounded(state: dict) -> bool:
+    """이 시점(_ElevenstFetchNode 완료 후)에 11번가 그라운딩이 이미 성공했는지 -
+    propose 단계의 LLM 폴백/소프트 교차확인 노드들이 자신을 건너뛸지 판단하는
+    데 공유로 쓴다(2026-08-20, "3개 LLM까지 필요없다" 조건부 게이팅 참고,
+    _ElevenstFetchNode·_skip_propose_if_elevenst_grounded·_CoupangCheckNode·
+    _NaverCheckNode)."""
+    try:
+        return bool(json.loads(state.get("elevenst_raw") or "[]"))
+    except (TypeError, ValueError):
+        return False
+
+
 class _ElevenstFetchNode(BaseAgent):
-    """11번가 오픈API(ProductSearch) 구조화 데이터를 propose 3개 모델과
-    나란히(동시에) 조회한다(2026-08-20, "11번가 api를 구해서 다나와를 폐기하고
-    11번가 쪽으로 방향을 틀려고") - _DanawaFetchNode와 같은 자리(propose_parallel)
-    소속이라 gpt/groq/deepseek LlmAgent와 동시 실행되므로 지연시간이 추가되지
-    않는다. 다나와 관련 코드/데이터 흐름(_DanawaFetchNode 포함)은 그대로
-    남겨뒀지만 이 노드로 교체하면서 propose_parallel에서는 빠졌다(_build_pipeline
-    참고).
+    """11번가 오픈API(ProductSearch)로 구조화 후보를 조회한다(2026-08-20,
+    "11번가 api를 구해서 다나와를 폐기하고 11번가 쪽으로 방향을 틀려고").
+
+    (2026-08-20 재구성, "3개 LLM까지 필요없다") 원래는 propose_parallel 소속으로
+    gpt/groq/deepseek LlmAgent와 동시 실행됐는데, 이제 propose_parallel보다
+    앞선 별도 순차 단계로 옮겼다 - propose의 유일한 LLM(deepseek, 폴백 전용)과
+    coupang_check/naver_check가 "elevenst 그라운딩이 이미 성공했는지"를 보고
+    자신을 건너뛸지 정해야 하는데, 병렬로 동시 실행되면 그 판단 시점에 이
+    노드가 아직 안 끝났을 수 있어(순서 보장이 없음) 판단 자체가 불가능했다.
+    순차 단계로 옮기면 SequentialAgent가 이 노드의 완료(state_delta 반영)를
+    보장한 뒤에야 propose_parallel이 시작되므로, 뒤이은 노드들이 _elevenst_
+    grounded(state)를 신뢰성 있게 볼 수 있다. 대가는 11번가 API 호출 하나가
+    이제 LLM 호출과 겹치지 않고 순차로 들어간다는 것(수백 ms) - 그라운딩이
+    성공하는 대부분의 경우 그 대가로 LLM 호출 자체(들)를 통째로 생략하므로
+    순이익이 훨씬 크다.
 
     elevenst_fetcher.search_products()는 예외를 던질 수 있어(11번가 쿼터/장애
-    거동이 검증 안 됨) 이 노드가 직접 감싼다 - 실패해도 gpt/groq/deepseek
-    후보만으로 파이프라인이 계속 진행된다. API 키 미설정 시에도 조용히
-    스킵한다(ocr/google_vision.py와 동일한 패턴)."""
+    거동이 검증 안 됨) 이 노드가 직접 감싼다 - 실패해도(elevenst_raw="[]")
+    뒤이은 deepseek 폴백이 조건부로 살아나 파이프라인이 계속 진행된다. API 키
+    미설정 시에도 조용히 스킵한다(ocr/google_vision.py와 동일한 패턴)."""
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         query = _refined_query_text(ctx.session.state)
@@ -384,14 +412,25 @@ class _ElevenstFetchNode(BaseAgent):
 class _CoupangCheckNode(BaseAgent):
     """challenge 단계에 쿠팡 검색 결과를 독립 교차 확인 신호로 추가한다
     (사용자 요청, 2026-08-16: "그라운딩 성능을 높여줘"). propose_parallel
-    소속이라 gpt/groq/deepseek/danawa와 동시 실행되어 지연시간이 추가되지
-    않는다. 다나와처럼 가격을 추출해 후보로 올리지는 않는다 - 쿠팡 페이지를
-    직접 파싱하지 않고(과거 15개 리테일러를 다나와 하나로 좁힌 이유였던
-    "스니펫만으로 파싱하면 엉뚱한 상품/가격이 섞이는 문제"를 재현하지 않기
-    위해) Tavily 스니펫만 challenge LLM에게 참고 신호로 넘긴다."""
+    소속이라 (조건부로 살아나는) deepseek 폴백과 동시 실행되어 지연시간이
+    추가되지 않는다. 다나와처럼 가격을 추출해 후보로 올리지는 않는다 - 쿠팡
+    페이지를 직접 파싱하지 않고(과거 15개 리테일러를 다나와 하나로 좁힌
+    이유였던 "스니펫만으로 파싱하면 엉뚱한 상품/가격이 섞이는 문제"를
+    재현하지 않기 위해) Tavily 스니펫만 challenge LLM에게 참고 신호로 넘긴다.
+
+    (2026-08-20, "3개 LLM까지 필요없다" 비용 점검에서 같이 발견) elevenst
+    그라운딩이 이미 성공했으면 이 신호는 아무도 안 읽는다 - _apply_challenge가
+    구조화 소스 후보의 challenge verdict를 애초에 무시하고, challenge LLM
+    호출 자체도 _skip_challenge_if_all_structured가 건너뛰므로 이 검색
+    결과를 담을 프롬프트가 아예 안 만들어진다. 그래서 elevenst가 그라운딩에
+    성공한 경우엔 이 Tavily 호출도 같이 건너뛴다."""
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
-        query = _refined_query_text(ctx.session.state)
+        state = ctx.session.state
+        if _elevenst_grounded(state):
+            yield Event(author=self.name, actions=EventActions(state_delta={"coupang_results": []}))
+            return
+        query = _refined_query_text(state)
         results = await search_module.search_coupang(query)
         yield Event(
             author=self.name,
@@ -405,10 +444,15 @@ class _NaverCheckNode(BaseAgent):
     실측가만 확정 소스이고 쿠팡 하나만으로는 교차 확인 대상이 한 곳뿐이라,
     서로 다른 두 번째 쇼핑몰을 propose_parallel에 같이 태워 challenge가 볼
     참고 자료를 넓힌다. 후보를 만들지 않는 점, 실패해도 조용히 빈 리스트인
-    점 모두 쿠팡 노드와 동일."""
+    점, elevenst 그라운딩 성공 시 건너뛰는 점 모두 쿠팡 노드와 동일(이유는
+    _CoupangCheckNode 참고)."""
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
-        query = _refined_query_text(ctx.session.state)
+        state = ctx.session.state
+        if _elevenst_grounded(state):
+            yield Event(author=self.name, actions=EventActions(state_delta={"naver_results": []}))
+            return
+        query = _refined_query_text(state)
         results = await search_module.search_naver(query)
         yield Event(
             author=self.name,
@@ -417,15 +461,18 @@ class _NaverCheckNode(BaseAgent):
 
 
 class _FilterMergeNode(BaseAgent):
-    """3개 제안 노드 + 다나와 후보의 원시 JSON을 각각 파싱+필터링한 뒤,
-    fusion.dedup으로 동일 상품을 병합한다 — 지금까지 어디서도 안 쓰이던
-    merge_candidates()가 여기서 처음 실사용된다."""
+    """제안 노드(elevenst + 조건부 deepseek 폴백) + 다나와 후보의 원시 JSON을
+    각각 파싱+필터링한 뒤, fusion.dedup으로 동일 상품을 병합한다 — 지금까지
+    어디서도 안 쓰이던 merge_candidates()가 여기서 처음 실사용된다.
+
+    (2026-08-20, "3개 LLM까지 필요없다") gpt/groq 슬롯은 propose_parallel에서
+    빠져서 raw_by_agent에도 없다 - _build_propose_agent 자체는 남아있으므로
+    필요하면 다시 추가할 수 있지만, 지금은 elevenst(구조화, 항상 시도) +
+    deepseek(그라운딩 실패시에만 조건부 호출) 둘뿐이다."""
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         state = ctx.session.state
         raw_by_agent = {
-            "gpt": state.get("gpt_raw"),
-            "groq": state.get("groq_raw"),
             "deepseek": state.get("deepseek_raw"),
             # "danawa": 2026-08-20부터 propose_parallel에서 빠져서 항상 None(무해) -
             # 다나와 관련 코드/데이터 흐름은 그대로 남겨뒀으므로 이 키 자체는 지우지
@@ -776,24 +823,45 @@ def _on_refine_model_error(callback_context, llm_request, error) -> LlmResponse 
 
 
 def _on_propose_model_error(callback_context, llm_request, error) -> LlmResponse | None:
-    """propose 3개(gpt/groq/deepseek) 중 하나라도 모델 호출에 실패하면 그
-    실패를 그대로 흘려보낸다(None 반환) - ADK는 이 콜백이 None을 반환하면
-    원래 예외를 그대로 raise한다(base_llm_flow._call_llm_async 참고). 그
-    예외는 run_stream()의 바깥 try/except가 잡아 pipeline_failed=True로
-    처리하고, proposals가 빈 채로 기존 clarify/relaxed fallback/
-    NO_CANDIDATE_ERROR 경로로 이어진다 - 즉 2/3만으로 최종 답을 내지 않는다.
+    """propose LLM 호출이 실패하면 그 실패를 그대로 흘려보낸다(None 반환) -
+    ADK는 이 콜백이 None을 반환하면 원래 예외를 그대로 raise한다
+    (base_llm_flow._call_llm_async 참고). 그 예외는 run_stream()의 바깥
+    try/except가 잡아 pipeline_failed=True로 처리하고, proposals가 빈 채로
+    기존 clarify/relaxed fallback/NO_CANDIDATE_ERROR 경로로 이어진다.
 
     (2026-08-18, 사용자 요청: "3개중 하나라도 빠지면 결과를 내지 않도록
     해야지 왜 3개를 안쓰고 2개만해서 결과를 내") 원래는 실패한 슬롯만 빈
-    배열("[]")로 대체해 나머지 2개로 계속 진행했다 - 3개 모델이 독립적으로
+    배열("[]")로 대체해 나머지로 계속 진행했다 - 여러 모델이 독립적으로
     같은 상품을 골랐는지(proposed_by 합의)가 그라운딩 신뢰도 신호로 쓰이는
-    구조라, 2/3만으로 낸 답은 원래 설계한 신뢰도보다 낮은데도 겉보기엔
-    구분이 안 됐다. 이제 하나라도 빠지면 아예 정직하게 실패로 처리한다."""
+    구조라, 일부만으로 낸 답은 원래 설계한 신뢰도보다 낮은데도 겉보기엔
+    구분이 안 됐다. 하나라도 빠지면 아예 정직하게 실패로 처리하기로 했다.
+
+    (2026-08-20, "3개 LLM까지 필요없다") propose LLM 슬롯이 deepseek 하나만
+    남아 이 콜백을 쓰는 건 이제 그 하나뿐이지만, 원칙은 그대로 유지한다 -
+    elevenst 그라운딩이 이미 성공했으면 이 LLM은 애초에 호출되지 않고
+    (_skip_propose_if_elevenst_grounded), 실패해서 정말 이 콜백까지 왔다는
+    건 elevenst도 실패했고 유일한 폴백마저 실패했다는 뜻이라 정직하게
+    실패시키는 게 더더욱 맞다."""
     logger.warning(
-        "%s propose 단계 모델 호출 실패 - 3개 전부 성공해야 하므로 파이프라인을 그대로 실패시킨다",
+        "%s propose 단계 모델 호출 실패 - 파이프라인을 그대로 실패시킨다",
         callback_context.agent_name,
         exc_info=error,
     )
+    return None
+
+
+def _skip_propose_if_elevenst_grounded(callback_context, llm_request) -> LlmResponse | None:
+    """propose의 유일한 LLM(deepseek)을 elevenst 그라운딩이 이미 성공했을 때
+    건너뛴다(2026-08-20, "3개 LLM까지 필요없다" - 사용자가 3개는 과하다고
+    판단, 그렇다고 0개면 rapidfuzz 그라운딩(_product_name_matches)이 못 잡는
+    오타/비속어/다르게 부르는 브랜드명 같은 경우의 안전망이 사라진다는 데
+    합의). elevenst_raw는 _ElevenstFetchNode가 이 단계(propose_parallel)보다
+    먼저 순차로 채워두므로 여기서 신뢰성 있게 읽을 수 있다. 그라운딩이
+    이미 성공했으면 deepseek_raw를 빈 배열로 채운 채 건너뛰고(다른 propose
+    슬롯이 실패했을 때와 동일한 "[]" 관례), 실패했을 때만(=진짜 필요할
+    때만) 실제로 호출해 의미적 매칭으로 한 번 더 시도한다."""
+    if _elevenst_grounded(callback_context.state):
+        return _model_error_fallback_response("[]")
     return None
 
 
@@ -833,7 +901,7 @@ def _build_refine_agent() -> LlmAgent:
     )
 
 
-def _build_propose_agent(name: str, model) -> LlmAgent:
+def _build_propose_agent(name: str, model, before_model_callback=None) -> LlmAgent:
     def instruction(ctx: ReadonlyContext) -> str:
         query = _refined_query_text(ctx.state)
         results = _search_results_from_state(ctx.state)
@@ -845,6 +913,7 @@ def _build_propose_agent(name: str, model) -> LlmAgent:
         instruction=instruction,
         output_key=f"{name}_raw",
         on_model_error_callback=_on_propose_model_error,
+        before_model_callback=before_model_callback,
     )
 
 
@@ -855,9 +924,9 @@ def _skip_challenge_if_all_structured(callback_context, llm_request) -> LlmRespo
     하나라도 있으면 challenge의 verdict를 통째로 무시하고 verified=True로
     강제한다(이미 실측 확인된 가격을 텍스트 기반 LLM에게 다시 판단하게 하는
     건 불필요하다는 게 그 검증 로직 자체의 전제). 11번가가 이제 유일한 검색
-    소스라 propose 3개(gpt/groq/deepseek)가 찾은 후보도 대부분 elevenst
-    픽과 병합되므로, 병합된 후보 전부가 구조화 소스를 포함하는 경우(=challenge
-    verdict를 아무도 안 볼 경우)가 흔해졌다 - 이때는 DeepSeek 호출 자체가
+    소스라, elevenst 그라운딩이 성공하면 propose의 유일한 LLM(deepseek)조차
+    조건부로 건너뛰므로(_skip_propose_if_elevenst_grounded) 병합된 후보가
+    elevenst 하나뿐인 경우가 흔하다 - 이때는 DeepSeek(challenge) 호출 자체가
     순수 낭비다. 후보가 하나도 없어도(검증할 대상 자체가 없음) 같은 이유로
     건너뛴다. verdicts를 빈 배열로 채운 채 넘기면 _apply_challenge가 challenge를
     실제로 돌렸을 때와 동일하게 동작한다(구조화 소스 후보는 애초에 verdicts를
@@ -956,50 +1025,29 @@ def _build_judge_agent() -> LlmAgent:
 
 
 def _build_pipeline() -> SequentialAgent:
-    gpt_raw = "gpt"
-    groq_raw = "groq"
     deepseek_raw = "deepseek"
 
     propose_parallel = ParallelAgent(
         name="propose",
         sub_agents=[
-            # "gpt" 슬롯은 2026-08-15부터 Qwen(DashScope)이 담당한다(사용자 요청:
-            # "GPT 토큰이 더 이상 없어서 Qwen 성능 제일 좋은 걸로 바꿔줘") - openai/
-            # 프리픽스 대신, DashScope의 OpenAI 호환 엔드포인트를 api_base로 직접
-            # 지정한다. litellm이 dashscope 프로바이더를 자체적으로 지원하는지에
-            # 기대지 않고, "그냥 OpenAI 호환 엔드포인트"로 취급하는 쪽이 확실하다
-            # (agents/gpt.py의 openai SDK+base_url 방식과 동일한 접근). name/
-            # output_key는 그대로 "gpt"라 스키마의 AgentName 리터럴이나 이 파일
-            # 다른 곳의 "gpt" 참조를 안 건드린다.
+            # (2026-08-20, "3개 LLM까지 필요없다") gpt(Qwen)/groq 슬롯은 여기서
+            # 뺐다 - 검색이 이제 11번가 하나뿐이라 세 LLM이 전부 _ElevenstFetchNode
+            # (아래, 이제 이 병렬 블록보다 먼저 순차 실행됨)와 완전히 같은 데이터를
+            # 보고 있었고, 그 구조화 데이터를 다시 텍스트로 추측해 읽는 것보다
+            # elevenst의 정확한 가격 필드를 그대로 쓰는 게 낫다. _build_propose_agent
+            # 자체는 그대로 남아있어 필요하면 언제든 다시 추가할 수 있다(gpt_raw
+            # 슬롯 관련 배경 코멘트는 git 히스토리 참고). deepseek 하나만 남기고,
+            # elevenst 그라운딩이 실패했을 때만(오타/비속어/다르게 부르는 브랜드명
+            # 등 rapidfuzz 매칭이 못 잡는 경우의 의미적 안전망) 조건부로 호출한다.
             _build_propose_agent(
-                gpt_raw,
-                LiteLlm(
-                    model=f"openai/{settings.qwen_model}",
-                    api_base=settings.qwen_api_base,
-                    api_key=settings.qwen_api_key,
-                    num_retries=0,
-                ),
+                deepseek_raw,
+                LiteLlm(model=f"deepseek/{settings.deepseek_model}", num_retries=0),
+                before_model_callback=_skip_propose_if_elevenst_grounded,
             ),
-            # 이 슬롯은 2026-08-16부터 Groq가 담당한다(사용자 요청: "deepseek
-            # Qwen 빼고 싹 다 무료 모델로 바꾸려고 해" - Gemini 프로젝트가
-            # 403으로 막혀있기도 했다). name/output_key는 원래 "gemini"였지만
-            # 2026-08-18("Gemini 이제 안쓰니까 이름 제대로 바꿔서 코드 반영해")
-            # 실제 쓰는 모델명을 따라 "groq"로 리네임했다(스키마 AgentName,
-            # 프론트엔드, 테스트 전반의 참조도 함께 바꿨다).
-            _build_propose_agent(groq_raw, _groq_model(settings.groq_model)),
-            _build_propose_agent(
-                deepseek_raw, LiteLlm(model=f"deepseek/{settings.deepseek_model}", num_retries=0)
-            ),
-            # 11번가 공식 API 구조화 가격 - 2026-08-20("11번가 api를 구해서
-            # 다나와를 폐기하고 11번가 쪽으로 방향을 틀려고") - 다나와
-            # 스크래핑의 불안정함(AWS IP 차단, search.danawa.com Crawl-delay)
-            # 대신 공식 오픈API로 구조화된 후보를 만든다. _DanawaFetchNode와
-            # 같은 자리(같은 ParallelAgent 소속, 지연시간 추가 없음)를 대신한다
-            # - _DanawaFetchNode 자체는 코드로 남겨뒀다(참고/롤백 대비).
-            _ElevenstFetchNode(name="elevenst"),
             # 쿠팡 교차 확인(2026-08-16, "그라운딩 성능을 높여줘") - 후보를 만들지
             # 않고 challenge 단계의 참고 신호만 채운다. 같은 ParallelAgent 소속이라
-            # 지연시간이 추가되지 않는다.
+            # 지연시간이 추가되지 않는다. elevenst 그라운딩 성공 시 자체적으로
+            # 건너뛴다(_CoupangCheckNode 참고 - challenge가 그 결과를 안 볼 것이므로).
             _CoupangCheckNode(name="coupang_check"),
             # 네이버쇼핑 교차 확인(2026-08-16, "다나와 단일 실측 소스에 대한
             # 의존도를 낮추도록") - 쿠팡과 같은 소프트 신호 패턴의 두 번째 소스.
@@ -1017,6 +1065,15 @@ def _build_pipeline() -> SequentialAgent:
             # _skip_refine_if_already_specific로 종종 건너뛰었다) 이 노드를
             # 아예 빼도 다른 코드 변경이 필요 없다.
             _SearchNode(name="search"),
+            # 11번가 공식 API 구조화 가격 - 2026-08-20("11번가 api를 구해서
+            # 다나와를 폐기하고 11번가 쪽으로 방향을 틀려고") - 다나와 스크래핑의
+            # 불안정함(AWS IP 차단, search.danawa.com Crawl-delay) 대신 공식
+            # 오픈API로 구조화된 후보를 만든다. _DanawaFetchNode 자체는 코드로
+            # 남겨뒀다(참고/롤백 대비). (2026-08-20 재구성) propose_parallel과
+            # 같은 자리에 있었으나, propose/coupang_check/naver_check가 이 결과를
+            # 보고 자신을 건너뛸지 정해야 해서 그보다 먼저 도는 별도 순차 단계로
+            # 옮겼다(_ElevenstFetchNode 문서 참고).
+            _ElevenstFetchNode(name="elevenst"),
             propose_parallel,
             _FilterMergeNode(name="filter_merge"),
             _ExtractPagesNode(name="extract_pages"),
