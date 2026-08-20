@@ -14,6 +14,7 @@ UTF-8로 디코딩하면 ProductName 등 모든 한글 필드가 깨진다 - 반
 from __future__ import annotations
 
 import logging
+import re
 from typing import TypedDict
 from xml.etree import ElementTree
 
@@ -25,6 +26,30 @@ logger = logging.getLogger(__name__)
 
 API_URL = "http://openapi.11st.co.kr/openapi/OpenApiService.tmall"
 REQUEST_TIMEOUT = 10.0
+
+# 실측(2026-08-20, apiCode=ProductSearch&option=Categories)으로 확인한 함정 -
+# 11번가는 다나와식 대분류/중분류 상품 카테고리 색인이 아니라, 검색어와 매칭된
+# "전시 카테고리"(dispCtgr) 목록을 평면으로 돌려준다. 여기엔 실제 상품
+# 카테고리(예: "과자/간식")와 프로모션 탭/이벤트 전시관(예: "홈쇼핑 Tab",
+# "9900원샵", "2020설", "쿠폰 발급용 추가 전시 카테고리")이 구분 없이 섞여
+# 있고, 건수(CategoryPrdCnt)도 실제 상품 수가 아니라 그 전시관의 진열 슬롯
+# 수라 조작된 상품 카테고리보다 더 높게 나오는 경우가 흔하다(실측: "오리온
+# 초코파이 말차쇼콜라" 검색 시 "과자/간식"(117건, 실제 카테고리)보다 "홈쇼핑
+# Tab"/"9900원샵"(각 120건, 프로모션 전시관)이 더 위에 옴). facet으로 그대로
+# 노출하면 사용자에게 "카테고리: 홈쇼핑 Tab" 같은 무의미한 선택지가 뜨므로,
+# 흔한 프로모션/이벤트 패턴을 이름으로 걸러낸다 - 완벽하지 않은 휴리스틱이라는
+# 한계는 있다(11번가가 실제 상품 카테고리와 전시 카테고리를 API 응답에서
+# 구분해 주지 않는 한 근본적으로 해소되지 않는다).
+_PROMO_CATEGORY_NAME_RE = re.compile(
+    r"(?:^\[\d{4}\]|Tab$|쿠폰|이벤트|전시|장바구니|기업서비스|폐점|^\d{4}\s*(?:년|설|럭셔리)|"
+    r"홈쇼핑|샵$|마켓$|배송$|데이$)"
+)
+
+
+class ElevenstCategoryGroup(TypedDict):
+    name: str
+    count: int
+    subcategories: list[dict]
 
 
 class ElevenstSearchBlocked(RuntimeError):
@@ -118,3 +143,52 @@ async def search_elevenst(query: str, limit: int = 5) -> list[ElevenstSearchItem
         xml_text = response.content.decode("euc-kr")
 
     return parse_search_xml(xml_text)[:limit]
+
+
+def parse_category_breakdown_xml(xml_text: str) -> list[ElevenstCategoryGroup]:
+    """apiCode=ProductSearch&option=Categories 응답 끝에 붙는 <Categories>
+    블록을 파싱한다(네트워크 없는 순수 함수 - 테스트는 이 함수로 한다).
+    11번가는 2단계(대분류/중분류) 위계를 안 주고 평면 목록만 주므로
+    subcategories는 항상 빈 리스트다 - _select_effective_category_name 등
+    호출부가 다나와와 같은 모양(name/count/subcategories)을 기대해 구조만
+    맞춰준다."""
+    root = ElementTree.fromstring(xml_text)
+    groups: list[ElevenstCategoryGroup] = []
+    seen_names: set[str] = set()
+
+    for category in root.findall(".//Categories/Category"):
+        name = _text(category.find("CategoryName"))
+        count_text = _text(category.find("CategoryPrdCnt"))
+        if not name or not count_text.isdigit() or name in seen_names:
+            continue
+        if _PROMO_CATEGORY_NAME_RE.search(name):
+            continue
+        seen_names.add(name)
+        groups.append(ElevenstCategoryGroup(name=name, count=int(count_text), subcategories=[]))
+
+    return groups
+
+
+async def search_categories(query: str) -> list[ElevenstCategoryGroup]:
+    """검색어와 매칭되는 11번가 전시 카테고리 집계를 가져온다
+    (app.debate.check_clarify_facets의 "카테고리" facet 실측 출처 -
+    price_table._search_elevenst_categories가 이 함수를 감싼다). 키가 없으면
+    빈 리스트."""
+    if not settings.elevenst_api_key:
+        return []
+
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+        response = await client.get(
+            API_URL,
+            params={
+                "key": settings.elevenst_api_key,
+                "apiCode": "ProductSearch",
+                "keyword": query,
+                "option": "Categories",
+                "pageSize": 1,
+            },
+        )
+        response.raise_for_status()
+        xml_text = response.content.decode("euc-kr")
+
+    return parse_category_breakdown_xml(xml_text)

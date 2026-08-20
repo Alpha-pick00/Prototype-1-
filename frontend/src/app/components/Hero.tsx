@@ -436,7 +436,7 @@ export const Hero = () => {
                       <div className="flex justify-start">
                         <div className="w-full group/assistant">
                           {turn.status === 'loading' && (
-                            <StreamingCard stage={turn.streamingStage || 'refining'} proposals={turn.streamingProposals} />
+                            <StreamingCard stage={turn.streamingStage || 'searching'} proposals={turn.streamingProposals} />
                           )}
                           {turn.status === 'error' && (
                             <ErrorCard

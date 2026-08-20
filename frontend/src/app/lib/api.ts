@@ -143,7 +143,7 @@ export interface OcrExtractResponse {
 
 export class ApiError extends Error {}
 
-// AI 상세검색(2026-08-12) - "음료수"처럼 짧고 애매한 검색어를 다나와 검색 결과에
+// AI 상세검색(2026-08-12) - "음료수"처럼 짧고 애매한 검색어를 11번가 검색 결과에
 // 근거해 DeepSeek이 카테고리/브랜드/용량 같은 기준(facet)으로 좁혀나가도록 제안한다.
 // 백엔드가 needs_clarification()으로 한 번 더 걸러서, 명확한 검색어면 검색/LLM
 // 호출 없이 즉시 facets: []로 끝난다(app/debate.py::check_clarify_facets 참고).
@@ -168,9 +168,9 @@ export function looksAmbiguous(query: string): boolean {
 }
 
 // baseQuery(2026-08-13, "조금 더 빠르게" 요청) - 드릴다운 중(예: "핸드폰" ->
-// "핸드폰 삼성전자")이면 그 체인의 맨 처음 검색어를 실어 보낸다. 백엔드가 매
-// 라운드 새로 search.danawa.com을 때리는(10초 Crawl-delay) 대신 이미 캐시된
-// base_query 결과를 재사용해 로컬 필터링만 하게 해준다(app/debate.py::check_clarify_facets).
+// "핸드폰 삼성전자")이면 그 체인의 맨 처음 검색어를 실어 보낸다. 백엔드가 그
+// base_query 결과를 검색해 나머지는 로컬 필터링만 하게 해준다
+// (app/debate.py::check_clarify_facets).
 //
 // sessionPreferences/token(2026-08-15, 사용자 페르소나 기반 상품 매핑) - 이번
 // 세션에서 지금까지 고른 facet 값({라벨: 값})을 실어 보내면, 로그인 계정의
@@ -237,7 +237,7 @@ export async function decide(query: string, brand?: string): Promise<DecideResul
   return response.json();
 }
 
-export type DecideStage = 'refining' | 'searching' | 'proposing' | 'challenging' | 'judging';
+export type DecideStage = 'searching';
 
 export type DecideStreamEvent =
   | { type: 'status'; stage: DecideStage }

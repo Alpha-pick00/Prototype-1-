@@ -1,6 +1,6 @@
 """fetchers.elevenst(11번가 오픈 API ProductSearch) 테스트.
 네트워크 요청 금지 - parse_search_xml은 순수 함수로, search_elevenst는
-httpx.MockTransport로 테스트한다(tests/test_danawa_search.py와 같은 패턴)."""
+httpx.MockTransport로 테스트한다."""
 
 from __future__ import annotations
 
