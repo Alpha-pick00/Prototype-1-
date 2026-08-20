@@ -5,6 +5,7 @@ from typing import Any, AsyncIterator
 
 from fetchers import elevenst
 
+from . import category
 from . import embeddings
 from . import facet_cache
 from . import llm_cache
@@ -597,90 +598,30 @@ async def check_clarify_facets(
     # 비어있을 것이므로 굳이 다시 부르지 않는다.
     categories = await price_table_module._search_elevenst_categories(search_query) if items else []
 
-    # 카테고리 축은 텍스트 재검색을 쓰지 않는다(2026-08-20 재설계, "텍스트
-    # 재검색 말고 다른 방식으로") - 11번가 오픈 API는 dispCtgrNo를
-    # ProductSearch에 넘겨도 서버 쪽에서 실제로 필터링해주지 않고(실측 확인 -
-    # TotalCount가 무시하고 그대로 나옴), 카테고리 이름("과자/간식" 등)은
-    # 다나와의 대분류/중분류와 달리 상품명 텍스트에 거의 등장하지 않아
-    # _filter_items_by_extra_terms 같은 순수 로컬 필터링도 통하지 않는다.
-    # 그래서 카테고리 facet은 실측 breakdown(categories, 아래
-    # _apply_category_breakdown)으로 정확하게 "보여주기"만 하고, 사용자가
-    # 골라도 표본을 카테고리로 좁히려 하지 않는다 - 브랜드/모델/용량처럼
-    # 값이 상품명에 실제로 등장하는 다른 축들이 아래 _filter_items_by_extra_terms로
-    # 표본을 구조적으로 좁혀 나간다(브랜드 -> 모델 -> 용량 순으로 자연스럽게
-    # 이어지는 게 그 예 - 순서 자체는 _facet_sort_key가 매 라운드 표본
-    # 기준으로 동적으로 정한다).
+    # 카테고리 축은 사용자에게 고르라고 묻지 않는다(2026-08-20 재설계, "카테고리는
+    # 선택안하고 쿼리를 기반으로 Groq이 자동으로 매핑할 수 있도록 해줘") - 11번가
+    # 오픈 API는 dispCtgrNo를 ProductSearch에 넘겨도 서버 쪽에서 실제로
+    # 필터링해주지 않고(실측 확인 - TotalCount가 무시하고 그대로 나옴), 카테고리
+    # 이름("과자/간식" 등)은 다나와의 대분류/중분류와 달리 상품명 텍스트에 거의
+    # 등장하지 않아 _filter_items_by_extra_terms 같은 순수 로컬 필터링도 통하지
+    # 않는다 - 그래서 애초에 "카테고리를 고르면 표본을 좁힌다"는 전제 자체가
+    # 성립하지 않는다. 대신 category.classify_category(Groq, 실측
+    # breakdown(categories) 중 하나를 즉시 고름)로 자동 분류해 detected_category에
+    # 정보성으로만 담는다 - 클릭 옵션이 아니다. DeepSeek이 자체적으로 "카테고리"
+    # 라벨 facet을 뽑아왔더라도(_extract_facets) 여기서 걸러낸다 - 이제 카테고리는
+    # 어디서도 되묻지 않는다. 브랜드/모델/용량처럼 값이 상품명에 실제로 등장하는
+    # 다른 축들이 아래 _filter_items_by_extra_terms로 표본을 구조적으로 좁혀
+    # 나간다(순서는 _facet_sort_key가 매 라운드 표본 기준으로 동적으로 정한다).
     if base_query and base_query.strip() and base_query.strip() != query.strip():
         items = _filter_items_by_extra_terms(items, query, base_query)
     names = [item["product_name"] for item in items]
     facets = await _extract_facets(query, names, persona)
+    facets = [f for f in facets if f.label != "카테고리"]
     facets = _strip_query_answered_options(query, facets)
-    # _apply_category_breakdown은 _strip_query_answered_options 뒤에 와야 한다 -
-    # 실측 카테고리 facet은 스스로 "이미 고른 값"을 정확히(부모 대분류 이름과의
-    # 우연한 부분 문자열 겹침을 걸러내고) 판정해 만들어지는데(_category_breakdown_facet
-    # 참고), 앞서 오면 이 일반 stripping이 그 정확한 결과를 다시 (덜 정확하게)
-    # 건드려버린다.
-    facets = _apply_category_breakdown(facets, query, categories)
-    return ClarifyResponse(query=query, options=ClarifyOptions(facets=facets))
-
-
-def _select_category_group(
-    query: str, groups: list[elevenst.ElevenstCategoryGroup]
-) -> elevenst.ElevenstCategoryGroup | None:
-    """이전 라운드에서 사용자가 카테고리 하나를 이미 골라 질의 텍스트에 그
-    이름이 그대로 들어있으면 그 카테고리를 돌려준다(_facet_resolved와 같은
-    텍스트 포함 판정). 여러 개가 동시에 부분 문자열로 걸리면(예: "태블릿/
-    휴대폰"을 고른 뒤에도 "태블릿"이라는 별개 중분류 이름이 그 안에 우연히
-    포함돼 같이 매치됨) 가장 긴(=가장 구체적인) 이름을 우선한다."""
-    matched = [g for g in groups if g["name"].casefold() in query.casefold()]
-    if not matched:
-        return None
-    return max(matched, key=lambda g: len(g["name"]))
-
-
-def _category_breakdown_facet(
-    query: str, categories: list[elevenst.ElevenstCategoryGroup]
-) -> ClarifyFacet | None:
-    """다나와 검색결과의 실측 카테고리 집계로 "카테고리" facet을 만든다
-    (2026-08-18 사용자 리포트: "샤오미"를 검색하면 AI 상세검색 카테고리에
-    휴대폰이 안 나온다 - DeepSeek이 보는 상품명 표본(_extract_facets, 최대
-    90개)이 다나와 검색 순위 상위권에 쏠려서, 특정 대분류 상품이 표본에 아예
-    안 걸리면 그 카테고리는 영원히 못 본다). 이 집계는 표본이 아니라 다나와
-    자체 카테고리 색인이라 표본 편향에서 자유롭다. 대분류가 2개 미만이면
-    (=애초에 여러 카테고리로 안 갈린다는 뜻) None."""
-    selected = _select_category_group(query, categories)
-    if selected is None:
-        groups = categories
-    else:
-        # selected["name"](대분류) 자체가 우연히 자기 중분류 이름을 부분
-        # 문자열로 포함할 수 있다(예: 대분류 "태블릿/휴대폰"은 중분류
-        # "휴대폰"을 이미 포함한다) - 그 부분을 지운 나머지에서만 "이미 고른
-        # 중분류"를 판정해야, 대분류만 고른 시점(아직 중분류는 안 고름)에
-        # 그 안에 우연히 포함된 중분류 옵션이 "이미 답함"으로 잘못 사라지지
-        # 않는다(_select_effective_category_name과 같은 이유).
-        remainder = query.casefold().replace(selected["name"].casefold(), "", 1)
-        groups = [g for g in selected["subcategories"] if g["name"].casefold() not in remainder]
-    groups = [g for g in groups if g["count"] > 0]
-    if len(groups) < 2:
-        return None
-    groups = sorted(groups, key=lambda g: g["count"], reverse=True)
-    return ClarifyFacet(label="카테고리", options=[g["name"] for g in groups])
-
-
-def _apply_category_breakdown(
-    facets: list[ClarifyFacet], query: str, categories: list[elevenst.ElevenstCategoryGroup]
-) -> list[ClarifyFacet]:
-    """DeepSeek이 뽑은 facets에 실측 카테고리 facet을 끼워 넣는다 - DeepSeek이
-    이미 "카테고리"(또는 동의어) 라벨로 뭔가 뽑았으면 그 옵션을 실측값으로
-    교체하고, 없으면 맨 앞에 새로 추가한다(카테고리는 가장 상위 질문이라
-    다른 축보다 먼저 물어보는 게 자연스럽다)."""
-    injected = _category_breakdown_facet(query, categories)
-    if injected is None:
-        return facets
-    result = [injected if f.label == injected.label else f for f in facets]
-    if not any(f.label == injected.label for f in facets):
-        result.insert(0, injected)
-    return result
+    detected_category = await category.classify_category(query, [g["name"] for g in categories])
+    return ClarifyResponse(
+        query=query, options=ClarifyOptions(facets=facets, detected_category=detected_category)
+    )
 
 
 def _facet_options_for_query(query: str, facet: ClarifyFacet) -> list[str]:
