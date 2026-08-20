@@ -26,6 +26,8 @@ const AGENT_LABEL: Record<string, string> = {
   gpt: 'Qwen',
   groq: 'Groq',
   deepseek: 'DeepSeek',
+  danawa: '다나와',
+  elevenst: '11번가',
 };
 
 const Card = ({ children }: { children: React.ReactNode }) => (
@@ -77,11 +79,7 @@ const BrandOptionRow = ({ option }: { option: BrandOption }) => (
 );
 
 const STAGE_LABEL: Record<DecideStage, string> = {
-  refining: '질의를 다듬고 있습니다',
-  searching: '다나와에서 검색하고 있습니다',
-  proposing: 'Qwen · Groq · DeepSeek가 후보를 찾고 있습니다',
-  challenging: 'DeepSeek가 근거를 검증하고 있습니다',
-  judging: 'Groq가 근거를 비교해 최종 추천을 고르고 있습니다',
+  searching: '11번가에서 검색하고 있습니다',
 };
 
 const ProposedByChips = ({ proposedBy }: { proposedBy: string[] | null | undefined }) =>
@@ -126,9 +124,9 @@ const CandidateProgressRow = ({ proposal }: { proposal: Proposal }) => (
   </div>
 );
 
-// AI 오케스트레이션(adk_pipeline: 정제→검색→제안→검증→심사) 진행 상태를 턴 안에서
-// 보여준다 - Hero.tsx가 turn.streamingStage/streamingProposals(SearchContext.runTurn이
-// decideStream 이벤트로 채운다)를 이 컴포넌트에 그대로 넘긴다.
+// 11번가 검색 진행 상태를 턴 안에서 보여준다 - Hero.tsx가
+// turn.streamingStage/streamingProposals(SearchContext.runTurn이 decideStream
+// 이벤트로 채운다)를 이 컴포넌트에 그대로 넘긴다.
 export const StreamingCard = ({ stage, proposals }: { stage: DecideStage; proposals: Proposal[] }) => (
   <Card>
     <div className="flex flex-col items-center text-center py-2 gap-6">
@@ -180,7 +178,7 @@ export type ClarifyStep = 'brand' | 'product' | 'volume' | 'quantity';
 
 const CLARIFY_STEP_ORDER: ClarifyStep[] = ['brand', 'product', 'volume', 'quantity'];
 
-// 고정 축(제품/용량/개수 - 브랜드는 아래에서 다나와 브랜드 최저가 단축 경로로
+// 고정 축(제품/용량/개수 - 브랜드는 아래에서 11번가 브랜드 최저가 단축 경로로
 // 따로 렌더된다) 하나를 실제 상담원처럼 자연스러운 질문 한 문장으로 물어보고
 // 버튼으로 답을 받는다. 채팅으로도 답할 수 있게 별도 입력창을 카드마다
 // 두었었는데, 화면 하단에 이미 검색창(GradientChatInput)이 있어 중복이라
@@ -265,7 +263,7 @@ export const SearchResults = ({
   // 반영해 좁혀줄 근거(options_by_selection)가 애초에 존재하지 않는다.
   // "검색어에 관련된 것"을 실제로 보여주려면 지어내지 않고 진짜로 그 결합
   // 검색어("핸드폰 샤오미")에 대해 다시 물어봐야 한다 - check_clarify_facets를
-  // base_query 없이 호출하면(캐시 재사용 최적화를 건너뛰어) 다나와를 그
+  // base_query 없이 호출하면(캐시 재사용 최적화를 건너뛰어) 11번가를 그
   // 결합 검색어로 실제로 다시 검색해서, 실제로 존재하는 샤오미 관련 facet
   // (기종·용량 등)을 새로 뽑아온다. liveFacets가 있으면 원래 facets 대신
   // 이걸 보여준다 - 라벨/구성이 달라질 수 있어 selectedFacets는 초기화한다.
@@ -402,7 +400,7 @@ export const SearchResults = ({
     // 고정 축(제품/용량/개수) 중 이번 라운드에 물어볼 하나만 고른다 - 한 번에
     // 다 보여주면 서로 다른 축이 뒤섞여 어떤 조합을 고르는 건지 애매해진다.
     // 옵션이 2개 이상인("진짜 애매한") 축을 우선하고, 전부 1개뿐이면(폴백) 그중
-    // 아무거나로 진행할 수 있게 열어준다. 브랜드는 다나와 브랜드 최저가 단축
+    // 아무거나로 진행할 수 있게 열어준다. 브랜드는 11번가 브랜드 최저가 단축
     // 경로(onSelectBrand)로 이미 별도 렌더되므로 이 로테이션에서 제외한다.
     // facets(AI 상세검색)와는 서로 다른 clarify 소스(check_clarify_facets/
     // run_clarify)라 겹치지 않고 그대로 병행 노출된다.
@@ -531,10 +529,10 @@ export const SearchResults = ({
                     );
                   })
                 ) : query.trim() ? (
-                  // 2026-08-18(사용자 리포트: "다나와에는 아이폰 15랑 샤오미가
+                  // 2026-08-18(사용자 리포트: "11번가에는 아이폰 15랑 샤오미가
                   // 있어" - 목록에 없는 값을 찾으면 막다른 "일치하는 항목이
                   // 없어요"만 뜨고 검색할 방법이 없었다) - 백엔드가 미리 뽑아준
-                  // 옵션 목록은 그 순간 다나와 검색 결과 상위 몇 건에서 나온
+                  // 옵션 목록은 그 순간 11번가 검색 결과 상위 몇 건에서 나온
                   // 값일 뿐 전체 카탈로그가 아니다. 그 목록에 없다고 검색 자체를
                   // 막지 말고, 타이핑한 값을 그대로 이 facet의 선택값으로 써서
                   // 검색하게 한다.

@@ -291,7 +291,7 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
     const skipIntentCheck = requestQuery !== (baseQuery ?? requestQuery);
 
     try {
-      // AI 상세검색(2026-08-12) - "음료수"처럼 짧고 애매한 검색어면 다나와 실측
+      // AI 상세검색(2026-08-12) - "음료수"처럼 짧고 애매한 검색어면 11번가 실측
       // 가격 스트림을 바로 태우기 전에 먼저 물어본다. looksAmbiguous()가
       // 대부분의(구체적인) 검색어를 걸러내므로 이 호출 자체가 거의 항상 스킵된다.
       // 실패해도(.catch) 조용히 원래 검색으로 넘어간다 - AI 상세검색은 있으면
@@ -325,7 +325,8 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
         },
         undefined,
         undefined,
-        skipIntentCheck
+        skipIntentCheck,
+        baseQuery
       );
 
       if (streamError || !finalResult) {

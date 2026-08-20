@@ -13,8 +13,6 @@ import asyncio
 import sqlite3
 from pathlib import Path
 
-from fetchers.danawa_autocomplete import autocomplete_danawa
-
 DB_PATH = Path(__file__).resolve().parent / "data" / "autocomplete.db"
 
 MAX_TERM_LENGTH = 40
@@ -23,7 +21,7 @@ MAX_TERM_LENGTH = 40
 RETAILER_TERMS = [
     "쿠팡", "네이버쇼핑", "컬리", "SSG", "G마켓", "CJ온스타일", "11번가",
     "GS SHOP", "현대홈쇼핑", "옥션", "알리익스프레스", "다이소", "롯데홈쇼핑",
-    "인터파크", "다나와",
+    "인터파크",
 ]
 
 # 카테고리별 대표 검색어(콜드스타트 시드). 네이버/구글처럼 일반 웹 검색어가 아니라,
@@ -340,33 +338,8 @@ def suggest(prefix: str, limit: int = 8) -> list[str]:
 
 
 async def suggest_merged(prefix: str, limit: int = 8) -> list[str]:
-    """사용자 요청(2026-08-11: "다나와에 상품이 있으면 자동완성으로 뜰 수
-    있도록") - 로컬 인덱스(suggest, 우리 서비스 실사용 기반)와 다나와 실시간
-    자동완성(fetchers.danawa_autocomplete, 다나와에 실제로 존재하는 상품/모델명
-    기반)을 합친다.
-
-    로컬 인덱스를 먼저 채우고, 거기 없는 다나와 제안만 뒤에 덧붙인다 - 이미
-    이 서비스에서 자주 검색/추천된 단어가 콜드스타트인 다나와 원본 제안보다
-    우선한다는 뜻이다. 다나와 쪽이 막히거나 느려도(autocomplete_danawa는
-    실패 시 항상 빈 리스트) 로컬 인덱스만으로 기존과 동일하게 동작한다."""
+    """로컬 인덱스(suggest, 우리 서비스 실사용 기반) 기반 자동완성."""
     prefix = prefix.strip()
     if not prefix:
         return []
-
-    local, danawa_terms = await asyncio.gather(
-        asyncio.to_thread(suggest, prefix, limit),
-        autocomplete_danawa(prefix, limit),
-    )
-
-    seen = {term.casefold() for term in local}
-    merged = list(local)
-    for term in danawa_terms:
-        key = term.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(term)
-        if len(merged) >= limit:
-            break
-
-    return merged[:limit]
+    return await asyncio.to_thread(suggest, prefix, limit)

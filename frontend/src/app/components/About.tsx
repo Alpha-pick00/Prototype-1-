@@ -2,30 +2,18 @@ import { useRef } from 'react';
 import { motion, useScroll, useTransform } from 'motion/react';
 import weCraftImage from '../../assets/about/we-craft.jpg';
 
-import danawaLogo from '../../assets/about/logos/danawa.webp';
-
 import qwenLogo from '../../assets/about/logos/qwen.svg';
 import deepseekLogo from '../../assets/about/logos/deepseek.svg';
 import awsLogo from '../../assets/about/logos/aws.svg';
-import tavilyLogo from '../../assets/about/logos/tavily.svg';
 
-// "gpt" 에이전트 슬롯은 2026-08-15부터 OpenAI 토큰 소진으로 Qwen(DashScope)이
-// 담당한다(backend/app/agents/gpt.py 참고) - qwen.svg는 정식 로고 에셋을 아직
-// 못 구해 임시 텍스트 워드마크다. 실제 로고 파일이 생기면 교체할 것.
-//
-// "gemini" 슬롯은 2026-08-16부터 Groq로 바뀌었고(agents/groq.py 참고),
-// 2026-08-18("Gemini 이제 안쓰니까 이름 제대로 바꿔서 코드 반영해") 식별자도
-// "groq"로 리네임했다 - Google Gemini 항목은 실제로 더 이상 안 쓰여서 뺐다.
-// judge 슬롯도 2026-08-16부터 Claude가 아니라 Groq다(agents/judge.py 참고) -
-// Anthropic Claude 항목도 같은 이유(사용자 리포트, 2026-08-19: "claude 이제
-// 사용안하는데")로 뺐다. Groq 정식 로고 에셋을 구하면 이 자리에 추가할 것
-// (지금은 Qwen 슬롯과 판매처 로고 위주로 목록이 구성돼 있다).
+// "gpt" 에이전트 슬롯은 Qwen(DashScope)이 담당한다(backend/app/agents/gpt.py
+// 참고) - qwen.svg는 정식 로고 에셋을 아직 못 구해 임시 텍스트 워드마크다.
+// 실제 로고 파일이 생기면 교체할 것. 메인 검색은 11번가 오픈 API 기반이라
+// (Tavily/다나와 스크래핑 제거) 11번가 로고 에셋을 구하면 이 자리에 추가할 것.
 const poweredByClients = [
-  { name: '다나와', url: 'https://www.danawa.com', logo: danawaLogo },
   { name: 'Qwen', url: 'https://qwenlm.ai', logo: qwenLogo },
   { name: 'DeepSeek', url: 'https://www.deepseek.com', logo: deepseekLogo },
   { name: 'Amazon AWS', url: 'https://aws.amazon.com', logo: awsLogo },
-  { name: 'Tavily', url: 'https://tavily.com', logo: tavilyLogo },
 ];
 
 export const About = () => {
@@ -159,9 +147,7 @@ export const About = () => {
 
         </div>
 
-        {/* Powered By - AI Models + Danawa (2026-08-15, "We Compare across 없애버리고
-            Powered By 하나로 통합" - 별도 섹션으로 나눠뒀던 다나와를 이 목록에
-            합쳐서 스캐닝 하나로 통일) */}
+        {/* Powered By - AI 모델 + 인프라 로고를 한 줄 스캐닝 목록으로 보여준다 */}
         <div className="mt-20 pt-16 border-t border-black/5">
           <span className="text-base font-mono uppercase tracking-widest text-neutral-400 block mb-6">Powered by</span>
           <div className="relative w-full overflow-hidden [mask-image:linear-gradient(to_right,transparent,black_8%,black_92%,transparent)]">

@@ -143,7 +143,7 @@ export interface OcrExtractResponse {
 
 export class ApiError extends Error {}
 
-// AI 상세검색(2026-08-12) - "음료수"처럼 짧고 애매한 검색어를 다나와 검색 결과에
+// AI 상세검색(2026-08-12) - "음료수"처럼 짧고 애매한 검색어를 11번가 검색 결과에
 // 근거해 DeepSeek이 카테고리/브랜드/용량 같은 기준(facet)으로 좁혀나가도록 제안한다.
 // 백엔드가 needs_clarification()으로 한 번 더 걸러서, 명확한 검색어면 검색/LLM
 // 호출 없이 즉시 facets: []로 끝난다(app/debate.py::check_clarify_facets 참고).
@@ -168,9 +168,9 @@ export function looksAmbiguous(query: string): boolean {
 }
 
 // baseQuery(2026-08-13, "조금 더 빠르게" 요청) - 드릴다운 중(예: "핸드폰" ->
-// "핸드폰 삼성전자")이면 그 체인의 맨 처음 검색어를 실어 보낸다. 백엔드가 매
-// 라운드 새로 search.danawa.com을 때리는(10초 Crawl-delay) 대신 이미 캐시된
-// base_query 결과를 재사용해 로컬 필터링만 하게 해준다(app/debate.py::check_clarify_facets).
+// "핸드폰 삼성전자")이면 그 체인의 맨 처음 검색어를 실어 보낸다. 백엔드가 그
+// base_query 결과를 검색해 나머지는 로컬 필터링만 하게 해준다
+// (app/debate.py::check_clarify_facets).
 //
 // sessionPreferences/token(2026-08-15, 사용자 페르소나 기반 상품 매핑) - 이번
 // 세션에서 지금까지 고른 facet 값({라벨: 값})을 실어 보내면, 로그인 계정의
@@ -237,7 +237,7 @@ export async function decide(query: string, brand?: string): Promise<DecideResul
   return response.json();
 }
 
-export type DecideStage = 'refining' | 'searching' | 'proposing' | 'challenging' | 'judging';
+export type DecideStage = 'searching';
 
 export type DecideStreamEvent =
   | { type: 'status'; stage: DecideStage }
@@ -246,13 +246,20 @@ export type DecideStreamEvent =
   | { type: 'error'; message: string };
 
 /** /decide와 같은 일을 하지만, 서버가 단계별로 흘려보내는 NDJSON(줄바꿈으로 구분된 JSON)을
- * 그때그때 onEvent로 넘겨준다 — 세 에이전트를 다 기다리지 않고 먼저 끝난 제안부터 보여줄 수 있다. */
+ * 그때그때 onEvent로 넘겨준다 — 세 에이전트를 다 기다리지 않고 먼저 끝난 제안부터 보여줄 수 있다.
+ *
+ * baseQuery(2026-08-20, HITL 구조적 필터 재설계) - 드릴다운 후속 턴(예: "핸드폰"
+ * -> "핸드폰 삼성전자")이면 그 체인의 맨 처음 검색어를 실어 보낸다. 안 보내면
+ * 백엔드가 매번 재구성된 전체 문자열로 새로 검색한다 - 보내면 base_query로
+ * 검색한 뒤 나머지는 로컬 필터링만 해서(app.debate._search_candidates) 같은
+ * 검색을 중복으로 다시 하지 않는다. */
 export async function decideStream(
   query: string,
   onEvent: (event: DecideStreamEvent) => void,
   brand?: string,
   signal?: AbortSignal,
-  skipIntentCheck?: boolean
+  skipIntentCheck?: boolean,
+  baseQuery?: string
 ): Promise<void> {
   const response = await fetch(`${API_URL}/decide/stream`, {
     method: 'POST',
@@ -261,6 +268,7 @@ export async function decideStream(
       query,
       ...(brand ? { brand } : {}),
       ...(skipIntentCheck ? { skip_intent_check: true } : {}),
+      ...(baseQuery ? { base_query: baseQuery } : {}),
     }),
     signal,
   });
