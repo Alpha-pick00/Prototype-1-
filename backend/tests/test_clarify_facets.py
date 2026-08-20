@@ -1,6 +1,12 @@
 """AI 상세검색(2026-08-12) 테스트 - "음료수"처럼 짧고 애매한 검색어를 DeepSeek이
-다나와 검색 결과 상품명에 근거해 facet(카테고리/브랜드/용량 등)으로 좁혀나가게
-제안하는 기능(원래 Qwen으로 붙였다가 계정 활성화 문제로 DeepSeek로 옮겼다).
+검색 결과 상품명에 근거해 facet(브랜드/용량 등)으로 좁혀나가게 제안하는 기능
+(원래 Qwen으로 붙였다가 계정 활성화 문제로 DeepSeek로 옮겼다).
+
+(2026-08-20) check_clarify_facets()의 검색 백엔드를 다나와 직접 스크래핑에서
+11번가(app.search.search)로 옮겼다 - 메인 파이프라인(adk_pipeline)이 먼저
+11번가로 전환됐는데 이 함수만 남아있던 걸 뒤늦게 맞췄다. base_query 재사용/
+카테고리 표본 좁히기 최적화는 다나와의 느린 검색(Crawl-delay)을 우회하려던
+용도라 11번가에선 필요 없어져 제거했다 - 관련 테스트도 함께 삭제했다.
 네트워크 요청 금지 - 전부 monkeypatch."""
 
 from __future__ import annotations
@@ -11,12 +17,8 @@ from fastapi.testclient import TestClient
 
 from app import decision_cache
 from app.debate import (
-    _apply_category_breakdown,
-    _category_breakdown_facet,
     _enrich_facets_per_brand,
     _MAX_BRAND_ENRICH_FANOUT,
-    _select_category_group,
-    _select_effective_category_name,
     _strip_query_answered_options,
     check_clarify_facets,
     run_clarify,
@@ -29,6 +31,12 @@ from app.main import app
 from app.schemas import ClarifyFacet, Decision, DecideResponse, SearchResult
 
 client = TestClient(app)
+
+
+def _sr(title: str, url: str | None = None) -> SearchResult:
+    """11번가 검색 결과 하나를 흉내낸다 - url을 안 주면 title만으로 안전한
+    (제네릭 목록 페이지로 안 걸리는) 상품 상세 URL을 만든다."""
+    return SearchResult(title=title, url=url or f"https://www.11st.co.kr/products/{abs(hash(title))}", snippet="", score=None)
 
 
 # -- intent.needs_clarification: 짧고 숫자 없는 검색어 휴리스틱 -----------------
@@ -119,10 +127,10 @@ def test_is_non_product_chitchat_false_for_buy_intent_even_with_chitchat_shape()
 
 
 def test_check_clarify_facets_returns_empty_immediately_for_greeting(monkeypatch):
-    async def _boom_search(query, limit=3):
-        raise AssertionError("잡담 입력인데 search_danawa가 호출됐다")
+    async def _boom_search(query, max_results=20):
+        raise AssertionError("잡담 입력인데 search가 호출됐다")
 
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _boom_search)
+    monkeypatch.setattr("app.search.search", _boom_search)
 
     async def _boom_facets(query, names):
         raise AssertionError("잡담 입력인데 extract_facets_from_names가 호출됐다")
@@ -218,8 +226,8 @@ def test_run_debate_uses_static_decision_cache_without_full_pipeline(monkeypatch
 
 
 def test_run_clarify_fails_fast_when_search_finds_nothing_without_full_pipeline(monkeypatch):
-    """is_non_product_chitchat이 못 잡는 임의의 인식 불가 텍스트라도, 다나와
-    검색 자체가 아무것도 못 찾았으면 run_single_debate(정제+검색+제안 3개+검증+
+    """is_non_product_chitchat이 못 잡는 임의의 인식 불가 텍스트라도, 11번가
+    검색 자체가 아무것도 못 찾았으면 run_single_debate(정제+검색+제안+검증+
     심사 전체 재실행)까지 새지 않고 바로 실패해야 한다."""
 
     async def _empty_search(query, max_results=10):
@@ -227,12 +235,12 @@ def test_run_clarify_fails_fast_when_search_finds_nothing_without_full_pipeline(
 
     monkeypatch.setattr("app.search.search", _empty_search)
 
-    async def _no_options(query, results):
+    async def _no_options(query, results, persona=None):
         return None
 
     monkeypatch.setattr("app.debate._extract_clarify_options", _no_options)
 
-    async def _boom_single_debate(query, skip_clarify=False):
+    async def _boom_single_debate(query, skip_clarify=False, persona=None):
         raise AssertionError("검색 결과가 0개인데 run_single_debate까지 흘러갔다")
 
     monkeypatch.setattr("app.debate.run_single_debate", _boom_single_debate)
@@ -249,18 +257,18 @@ def test_run_clarify_still_falls_back_to_full_pipeline_when_search_has_results(m
     run_single_debate로 폴백해야 한다 - 이번 변경으로 이 경로를 막으면 안 된다."""
 
     async def _some_results(query, max_results=10):
-        return [SearchResult(title="다나와", url="https://prod.danawa.com/info?pcode=1", snippet="", score=0.9)]
+        return [_sr("11번가 상품")]
 
     monkeypatch.setattr("app.search.search", _some_results)
 
-    async def _no_options(query, results):
+    async def _no_options(query, results, persona=None):
         return None
 
     monkeypatch.setattr("app.debate._extract_clarify_options", _no_options)
 
     called = {"value": False}
 
-    async def _fake_single_debate(query, skip_clarify=False):
+    async def _fake_single_debate(query, skip_clarify=False, persona=None):
         called["value"] = True
         return DecideResponse(
             query=query,
@@ -859,314 +867,6 @@ def test_extract_facets_from_names_balances_phone_model_options_across_brand_eco
     assert "아이폰17 프로" in options
 
 
-def test_check_clarify_facets_attaches_facet_crossfilter_symmetrically(monkeypatch):
-    """사용자 요청(2026-08-13: "삼성전자를 누르면은 시리즈에 삼성전자에 관한것만
-    APPLE을 누르면 시리즈에 아이폰만" -> 2026-08-14: "시리즈에 초코파이 바나나를
-    골랐다면 용량에 없는것들은 선택할수 없게" - 브랜드 전용이었던 걸 모든 facet
-    쌍으로 일반화했다) - 검색을 다시 하지 않고, 이미 받아온 상품명만으로 옵션을
-    다른 facet 값별로 미리 나눠서 응답에 실어줘야 한다. 양방향(브랜드->시리즈,
-    시리즈->브랜드)으로 다 계산돼야 한다."""
-
-    async def _fake_search_danawa(query, limit=3):
-        return [
-            {"pcode": "1", "product_name": "삼성전자 갤럭시S25 256GB", "total_mall_count": None},
-            {"pcode": "2", "product_name": "삼성전자 갤럭시Z 폴드8 512GB", "total_mall_count": None},
-            {"pcode": "3", "product_name": "APPLE 아이폰17 256GB", "total_mall_count": None},
-            {"pcode": "4", "product_name": "APPLE 아이폰17 프로 512GB", "total_mall_count": None},
-        ]
-
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
-
-    async def _fake_extract_facets(query, names):
-        return [
-            ClarifyFacet(label="브랜드", options=["삼성전자", "APPLE"]),
-            ClarifyFacet(label="시리즈", options=["갤럭시S25", "갤럭시Z 폴드8", "아이폰17", "아이폰17 프로"]),
-        ]
-
-    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
-
-    result = asyncio.run(check_clarify_facets("핸드폰"))
-
-    by_label = {f.label: f for f in result.options.facets}
-    assert by_label["브랜드"].options_by_selection == {
-        "갤럭시S25": ["삼성전자"],
-        "갤럭시Z 폴드8": ["삼성전자"],
-        "아이폰17": ["APPLE"],
-        "아이폰17 프로": ["APPLE"],
-    }
-    assert by_label["시리즈"].options_by_selection == {
-        "삼성전자": ["갤럭시S25", "갤럭시Z 폴드8"],
-        "APPLE": ["아이폰17", "아이폰17 프로"],
-    }
-
-
-def test_check_clarify_facets_crossfilter_works_between_non_brand_facets(monkeypatch):
-    """사용자 요청(2026-08-14: "내가 만약 시리즈에 초코파이 바나나를 골랏다면
-    용량에 없는것들은 선택할수없게 해야해") - 브랜드가 아니어도(시리즈 -> 용량)
-    facet 사이 연관이 계산돼야 한다."""
-
-    async def _fake_search_danawa(query, limit=3):
-        return [
-            {"pcode": "1", "product_name": "오리온 초코파이 바나나 468g", "total_mall_count": None},
-            {"pcode": "2", "product_name": "오리온 초코파이 바나나 234g", "total_mall_count": None},
-            {"pcode": "3", "product_name": "오리온 초코파이 오리지널 336g", "total_mall_count": None},
-            {"pcode": "4", "product_name": "오리온 초코파이 오리지널 672g", "total_mall_count": None},
-        ]
-
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
-
-    async def _fake_extract_facets(query, names):
-        return [
-            ClarifyFacet(label="시리즈", options=["초코파이 바나나", "초코파이 오리지널"]),
-            ClarifyFacet(label="용량", options=["468g", "234g", "336g", "672g"]),
-        ]
-
-    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
-
-    result = asyncio.run(check_clarify_facets("초코파이"))
-
-    by_label = {f.label: f for f in result.options.facets}
-    assert by_label["용량"].options_by_selection == {
-        "초코파이 바나나": ["468g", "234g"],
-        "초코파이 오리지널": ["336g", "672g"],
-    }
-
-
-def test_check_clarify_facets_orders_facets_from_macro_to_micro(monkeypatch):
-    """사용자 요청(2026-08-14: "거시적인 선택에서 미시적인 선택으로 점차
-    줄여나가게") - LLM이 낸 순서와 무관하게 카테고리/브랜드 같은 넓은 기준이
-    용량/특징 같은 좁은 기준보다 먼저 오도록 정렬해야 한다."""
-
-    async def _fake_search_danawa(query, limit=3):
-        return [{"pcode": "1", "product_name": "오리온 초코파이 바나나 468g", "total_mall_count": None}]
-
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
-
-    async def _fake_extract_facets(query, names):
-        # 일부러 미시적인 것부터 거꾸로 반환한다 - 정렬이 실제로 라벨 순서를
-        # 바꾸는지 확인하려면 원래 순서가 이미 macro->micro면 안 된다.
-        return [
-            ClarifyFacet(label="특징", options=["저당", "고당"]),
-            ClarifyFacet(label="용량", options=["468g", "234g"]),
-            ClarifyFacet(label="브랜드", options=["오리온", "롯데"]),
-        ]
-
-    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
-
-    result = asyncio.run(check_clarify_facets("초코파이"))
-
-    assert [f.label for f in result.options.facets] == ["브랜드", "용량", "특징"]
-
-
-def test_check_clarify_facets_orders_phone_model_facet_first(monkeypatch):
-    """사용자 요청(2026-08-14: "검색 순서에서 핸드폰 기종이 가장 먼저 위로
-    올라가야할 것 같은데") - '핸드폰 기종' 기준은 카테고리/브랜드보다도 먼저
-    와야 한다."""
-
-    async def _fake_search_danawa(query, limit=3):
-        return [{"pcode": "1", "product_name": "삼성전자 갤럭시S25 케이스", "total_mall_count": None}]
-
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
-
-    async def _fake_extract_facets(query, names, required_labels=None):
-        return [
-            ClarifyFacet(label="브랜드", options=["삼성전자", "신지모루"]),
-            ClarifyFacet(label="특징", options=["방수", "충격방지"]),
-            ClarifyFacet(label="핸드폰 기종", options=["갤럭시S25", "갤럭시S26"]),
-        ]
-
-    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
-
-    result = asyncio.run(check_clarify_facets("핸드폰 케이스"))
-
-    assert result.options.facets[0].label == "핸드폰 기종"
-
-
-# -- 다나와 실측 카테고리 집계로 "카테고리" facet을 채우고, 선택된 카테고리로
-# 표본을 다시 좁히는 기능(2026-08-18 사용자 리포트: "샤오미로 검색하면 AI
-# 상세검색 카테고리에 휴대폰이 안 나온다" / "카테고리를 고르면 모델도, 모델을
-# 고르면 용량도 그에 맞게 좁혀져야지 - 안 그러면 공기청정기 · 미 패드5처럼
-# 존재하지 않는 상품으로 매핑돼") -------------------------------------------
-
-_XIAOMI_CATEGORIES = [
-    {
-        "name": "태블릿/휴대폰",
-        "count": 202586,
-        "subcategories": [
-            {"name": "휴대폰 주변용품", "count": 77372},
-            {"name": "휴대폰", "count": 20469},
-        ],
-    },
-    {
-        "name": "생활가전",
-        "count": 56381,
-        "subcategories": [{"name": "청소기", "count": 47851}],
-    },
-]
-
-
-def test_select_category_group_prefers_longest_match_on_overlap():
-    # "태블릿/휴대폰"을 고른 뒤에도 "휴대폰"이라는 별개 중분류 이름이 그 문자열
-    # 안에 부분적으로 걸린다 - 더 구체적인(긴) "태블릿/휴대폰"을 우선해야 한다.
-    top = _select_category_group("샤오미 태블릿/휴대폰", _XIAOMI_CATEGORIES)
-    assert top["name"] == "태블릿/휴대폰"
-
-
-def test_select_effective_category_name_returns_subcategory_when_drilled_down():
-    name = _select_effective_category_name("샤오미 태블릿/휴대폰 휴대폰", _XIAOMI_CATEGORIES)
-    assert name == "휴대폰"
-
-
-def test_select_effective_category_name_returns_top_level_when_only_top_chosen():
-    name = _select_effective_category_name("샤오미 태블릿/휴대폰", _XIAOMI_CATEGORIES)
-    assert name == "태블릿/휴대폰"
-
-
-def test_select_effective_category_name_none_when_nothing_chosen():
-    assert _select_effective_category_name("샤오미", _XIAOMI_CATEGORIES) is None
-
-
-def test_category_breakdown_facet_uses_top_level_groups_by_default():
-    facet = _category_breakdown_facet("샤오미", _XIAOMI_CATEGORIES)
-    assert facet.label == "카테고리"
-    assert facet.options == ["태블릿/휴대폰", "생활가전"]  # count 내림차순
-
-
-def test_category_breakdown_facet_narrows_to_subcategories_once_selected():
-    facet = _category_breakdown_facet("샤오미 태블릿/휴대폰", _XIAOMI_CATEGORIES)
-    # 대분류 "태블릿/휴대폰"만 골랐을 뿐 중분류 "휴대폰"은 아직 안 골랐다 -
-    # 대분류 이름 자체가 우연히 "휴대폰"을 부분 문자열로 포함한다고 해서
-    # 이미 고른 것으로 착각해 옵션에서 지우면 안 된다(2026-08-18 실측:
-    # 바로 이 문제로 정작 사용자가 원했던 "휴대폰" 옵션이 화면에서 사라졌었다).
-    assert facet.options == ["휴대폰 주변용품", "휴대폰"]
-
-
-def test_category_breakdown_facet_excludes_genuinely_chosen_subcategory():
-    facet = _category_breakdown_facet("샤오미 태블릿/휴대폰 휴대폰", _XIAOMI_CATEGORIES)
-    # 이번엔 "휴대폰"이 대분류 이름 바깥에 별도로 등장하므로 진짜로 고른 것 -
-    # 남은 옵션이 "휴대폰 주변용품" 하나뿐이라(2개 미만) facet 자체가 사라진다.
-    assert facet is None
-
-
-def test_category_breakdown_facet_none_when_fewer_than_two_groups():
-    assert _category_breakdown_facet("샤오미", [_XIAOMI_CATEGORIES[0]]) is None
-
-
-def test_apply_category_breakdown_replaces_llm_facet_with_real_breakdown():
-    # DeepSeek이 표본 편향(휴대폰이 표본에 없음)으로 "생활가전"만 뽑았어도,
-    # 실측 집계에 있는 "태블릿/휴대폰"으로 교체돼야 한다.
-    facets = [ClarifyFacet(label="카테고리", options=["생활가전"])]
-    result = _apply_category_breakdown(facets, "샤오미", _XIAOMI_CATEGORIES)
-    assert len(result) == 1
-    assert result[0].options == ["태블릿/휴대폰", "생활가전"]
-
-
-def test_apply_category_breakdown_inserts_when_no_category_facet_exists():
-    facets = [ClarifyFacet(label="모델", options=["미지아 선풍기"])]
-    result = _apply_category_breakdown(facets, "샤오미", _XIAOMI_CATEGORIES)
-    assert [f.label for f in result] == ["카테고리", "모델"]
-
-
-def test_check_clarify_facets_no_longer_injects_category_facet(monkeypatch):
-    """(2026-08-20, "카테고리 선택 안 하게 만들고") 예전엔 브랜드 전체 표본에
-    없는 카테고리도 다나와 실측 카테고리 집계로 "카테고리" facet에 끼워 넣어
-    되물었다(샤오미 실측: 상위 40개가 전부 액세서리/가전이라 휴대폰이 없어도
-    "태블릿/휴대폰" 카테고리를 확인하게 했다) - 이제 이 되물음 자체를 없앴다.
-    "이프로"처럼 브랜드만 봐도 카테고리가 명백한 질의에 불필요한 카테고리
-    확인 질문을 던지지 않기 위함이다. _category_breakdown_facet/
-    _apply_category_breakdown 함수 자체는 남아있지만 check_clarify_facets가
-    더 이상 호출하지 않는다(아래 단위 테스트들이 함수 자체는 계속 검증)."""
-
-    async def _fake_search_danawa(query, limit=90):
-        return [{"pcode": "1", "product_name": "샤오미 미지아 선풍기", "total_mall_count": None}]
-
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
-
-    async def _fake_search_danawa_categories(query):
-        return _XIAOMI_CATEGORIES
-
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa_categories", _fake_search_danawa_categories)
-
-    async def _fake_extract_facets(query, names):
-        return [ClarifyFacet(label="모델", options=names)]
-
-    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
-
-    result = asyncio.run(check_clarify_facets("샤오미"))
-
-    by_label = {f.label: f for f in result.options.facets}
-    assert "카테고리" not in by_label
-    assert by_label["모델"].options == ["샤오미 미지아 선풍기"]
-
-
-def test_check_clarify_facets_strips_category_facet_even_if_deepseek_still_proposes_one(monkeypatch):
-    """(2026-08-20 실측 회귀) 위 테스트는 DeepSeek이 "카테고리" facet을 아예
-    안 낸 경우만 다룬다 - 실제로는 프롬프트에서 "카테고리"를 예시/JSON 형식에서
-    빼고 만들지 말라고 명시했는데도(agents.base.FACET_CLARIFY_INSTRUCTIONS)
-    DeepSeek이 "초코파이" 검색에 "카테고리": ["초코파이", "과자세트", "과자", ...]
-    처럼 검색어 자체를 되묻는 facet을 스스로 만들어낸 사례가 있었다(다른 프롬프트
-    지시를 안정적으로 안 지키는 _strip_query_answered_options와 같은 유형의 문제).
-    _extract_facets가 label=="카테고리"인 facet을 한 번 더 걸러내는지 확인한다."""
-
-    async def _fake_search_danawa(query, limit=90):
-        return [{"pcode": "1", "product_name": "오리온 초코파이 바나나 468g", "total_mall_count": None}]
-
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
-
-    async def _fake_extract_facets(query, names):
-        return [
-            ClarifyFacet(label="카테고리", options=["초코파이", "과자세트", "과자", "선물세트", "파이", "케이크"]),
-            ClarifyFacet(label="용량", options=["468g", "234g"]),
-        ]
-
-    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
-
-    result = asyncio.run(check_clarify_facets("초코파이"))
-
-    by_label = {f.label: f for f in result.options.facets}
-    assert "카테고리" not in by_label
-    assert by_label["용량"].options == ["468g", "234g"]
-
-
-def test_check_clarify_facets_rescopes_sample_when_category_already_selected(monkeypatch):
-    """카테고리를 이미 골랐으면(질의에 그 이름이 있으면) 브랜드 전체 표본이
-    아니라 그 카테고리로 좁힌 실제 표본으로 나머지 facet(모델 등)을 뽑아야
-    한다 - 안 그러면 "공기청정기" 카테고리를 골랐는데 "모델" facet에 전혀
-    다른 카테고리 상품(예: "미 패드5")이 섞여 나온다."""
-    brand_wide_items = [{"pcode": "1", "product_name": "샤오미 미지아 선풍기", "total_mall_count": None}]
-    phone_items = [
-        {"pcode": "2", "product_name": "샤오미 포코 X8 프로 256GB", "total_mall_count": None},
-        {"pcode": "3", "product_name": "샤오미 15T 프로 512GB", "total_mall_count": None},
-        {"pcode": "4", "product_name": "샤오미 레드미 노트14 프로 256GB", "total_mall_count": None},
-    ]
-
-    async def _fake_search_danawa(query, limit=90):
-        if query == "샤오미 휴대폰":
-            return phone_items
-        return brand_wide_items
-
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
-
-    async def _fake_search_danawa_categories(query):
-        return _XIAOMI_CATEGORIES
-
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa_categories", _fake_search_danawa_categories)
-
-    async def _fake_extract_facets(query, names):
-        return [ClarifyFacet(label="모델", options=names)]
-
-    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
-
-    result = asyncio.run(check_clarify_facets("샤오미 태블릿/휴대폰 휴대폰", base_query="샤오미"))
-
-    by_label = {f.label: f for f in result.options.facets}
-    assert by_label["모델"].options == [
-        "샤오미 포코 X8 프로 256GB",
-        "샤오미 15T 프로 512GB",
-        "샤오미 레드미 노트14 프로 256GB",
-    ]
-
-
 def test_extract_facets_from_names_returns_empty_on_no_product_names():
     from app.agents import deepseek
 
@@ -1194,13 +894,13 @@ def test_extract_facets_from_names_swallows_client_errors(monkeypatch):
 
 
 def test_check_clarify_facets_skips_search_for_specific_query(monkeypatch):
-    """구체적인 검색어는 needs_clarification()이 False라 다나와 검색조차 시도하지
-    않아야 한다 - search_danawa가 불리면 바로 실패하도록 걸어서 확인한다."""
+    """구체적인 검색어는 needs_clarification()이 False라 11번가 검색조차 시도하지
+    않아야 한다 - search가 불리면 바로 실패하도록 걸어서 확인한다."""
 
-    async def _boom(query, limit=3):
-        raise AssertionError("구체적인 검색어인데 search_danawa가 호출됐다")
+    async def _boom(query, max_results=20):
+        raise AssertionError("구체적인 검색어인데 search가 호출됐다")
 
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _boom)
+    monkeypatch.setattr("app.search.search", _boom)
 
     result = asyncio.run(check_clarify_facets("아이폰 15 프로 256기가"))
 
@@ -1216,10 +916,10 @@ def test_check_clarify_facets_uses_static_cache_without_any_search_or_llm_call(m
     정규식으로 바꾸자") - facet_cache에 있는 카테고리는 검색도 DeepSeek 호출도
     없이 즉시 답해야 한다."""
 
-    async def _boom_search(query, limit=3):
-        raise AssertionError("정적 캐시에 있는 카테고리인데 search_danawa가 호출됐다")
+    async def _boom_search(query, max_results=20):
+        raise AssertionError("정적 캐시에 있는 카테고리인데 search가 호출됐다")
 
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _boom_search)
+    monkeypatch.setattr("app.search.search", _boom_search)
 
     async def _boom_facets(query, names):
         raise AssertionError("정적 캐시에 있는 카테고리인데 extract_facets_from_names가 호출됐다")
@@ -1238,11 +938,11 @@ def test_check_clarify_facets_static_cache_ignores_queries_with_extra_words(monk
     일치할 때만 정적 캐시를 쓴다(부분 문자열 매치 아님)."""
     seen: list[str] = []
 
-    async def _fake_search_danawa(query, limit=3):
+    async def _fake_search(query, max_results=20):
         seen.append(query)
-        return [{"pcode": "1", "product_name": "아이폰 케이스 실리콘", "total_mall_count": None}]
+        return [_sr("아이폰 케이스 실리콘")]
 
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
+    monkeypatch.setattr("app.search.search", _fake_search)
     monkeypatch.setattr(
         "app.agents.deepseek.extract_facets_from_names", lambda query, names: asyncio.sleep(0, result=[])
     )
@@ -1255,10 +955,10 @@ def test_check_clarify_facets_static_cache_ignores_queries_with_extra_words(monk
 def test_check_clarify_facets_static_cache_miss_falls_through_to_real_search(monkeypatch):
     """목록에 없는 카테고리는 지금까지처럼 실제 검색+추출 경로를 그대로 타야 한다."""
 
-    async def _fake_search_danawa(query, limit=3):
-        return [{"pcode": "1", "product_name": "코카콜라 350ml 24개", "total_mall_count": None}]
+    async def _fake_search(query, max_results=20):
+        return [_sr("코카콜라 350ml 24개")]
 
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
+    monkeypatch.setattr("app.search.search", _fake_search)
 
     async def _fake_extract_facets(query, names):
         return [ClarifyFacet(label="브랜드", options=["오리온"])]
@@ -1277,17 +977,17 @@ def test_check_clarify_facets_static_cache_miss_falls_through_to_real_search(mon
 
 def test_check_clarify_facets_refines_conversational_query_before_searching(monkeypatch):
     """"안녕 충전기 살래"처럼 인사말/구매의도 문구가 섞인 질의는 groq.refine_query로
-    정제한 뒤에야 다나와 검색에 써야 한다 - 원본 그대로 검색하면 잡음 때문에
-    실제 상품을 잘 못 찾는다."""
+    정제한 뒤에야 검색에 써야 한다 - 원본 그대로 검색하면 잡음 때문에 실제
+    상품을 잘 못 찾는다."""
     from app.agents import groq
 
     captured_search_query: list[str] = []
 
-    async def _fake_search_danawa(query, limit=3):
+    async def _fake_search(query, max_results=20):
         captured_search_query.append(query)
-        return [{"pcode": "1", "product_name": "삼성전자 25W 고속충전기", "total_mall_count": None}]
+        return [_sr("삼성전자 25W 고속충전기")]
 
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
+    monkeypatch.setattr("app.search.search", _fake_search)
 
     async def _fake_refine_query(query):
         assert query == "안녕 충전기 살래"
@@ -1310,10 +1010,10 @@ def test_check_clarify_facets_skips_refine_for_already_clean_query(monkeypatch):
     않아야 한다 - 매번 불렀다면 이번 세션에서 줄인 LLM 호출 수가 다시 늘어난다."""
     from app.agents import groq
 
-    async def _fake_search_danawa(query, limit=3):
-        return [{"pcode": "1", "product_name": "오리온 초코파이", "total_mall_count": None}]
+    async def _fake_search(query, max_results=20):
+        return [_sr("오리온 초코파이")]
 
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
+    monkeypatch.setattr("app.search.search", _fake_search)
 
     async def _fail_if_called(query):
         raise AssertionError("이미 깨끗한 검색어인데 refine_query가 호출됐다")
@@ -1329,13 +1029,10 @@ def test_check_clarify_facets_skips_refine_for_already_clean_query(monkeypatch):
 
 
 def test_check_clarify_facets_returns_facets_for_ambiguous_query(monkeypatch):
-    async def _fake_search_danawa(query, limit=3):
-        return [
-            {"pcode": "1", "product_name": "코카콜라 350ml 24개", "total_mall_count": None},
-            {"pcode": "2", "product_name": "칠성사이다 190ml", "total_mall_count": None},
-        ]
+    async def _fake_search(query, max_results=20):
+        return [_sr("코카콜라 350ml 24개"), _sr("칠성사이다 190ml")]
 
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
+    monkeypatch.setattr("app.search.search", _fake_search)
 
     async def _fake_extract_facets(query, names):
         assert names == ["코카콜라 350ml 24개", "칠성사이다 190ml"]
@@ -1347,6 +1044,34 @@ def test_check_clarify_facets_returns_facets_for_ambiguous_query(monkeypatch):
 
     assert result.mode == "clarify"
     assert result.options.facets == [ClarifyFacet(label="브랜드", options=["코카콜라", "칠성사이다"])]
+
+
+def test_check_clarify_facets_strips_category_facet_even_if_deepseek_still_proposes_one(monkeypatch):
+    """(2026-08-20 실측 회귀) 프롬프트에서 "카테고리"를 예시/JSON 형식에서 빼고
+    만들지 말라고 명시했는데도(agents.base.FACET_CLARIFY_INSTRUCTIONS) DeepSeek이
+    "초코파이" 검색에 "카테고리": ["초코파이", "과자세트", "과자", ...]처럼
+    검색어 자체를 되묻는 facet을 스스로 만들어낸 사례가 있었다(다른 프롬프트
+    지시를 안정적으로 안 지키는 _strip_query_answered_options와 같은 유형의 문제).
+    _extract_facets가 label=="카테고리"인 facet을 한 번 더 걸러내는지 확인한다."""
+
+    async def _fake_search(query, max_results=20):
+        return [_sr("오리온 초코파이 바나나 468g")]
+
+    monkeypatch.setattr("app.search.search", _fake_search)
+
+    async def _fake_extract_facets(query, names):
+        return [
+            ClarifyFacet(label="카테고리", options=["초코파이", "과자세트", "과자", "선물세트", "파이", "케이크"]),
+            ClarifyFacet(label="용량", options=["468g", "234g"]),
+        ]
+
+    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
+
+    result = asyncio.run(check_clarify_facets("초코파이"))
+
+    by_label = {f.label: f for f in result.options.facets}
+    assert "카테고리" not in by_label
+    assert by_label["용량"].options == ["468g", "234g"]
 
 
 def test_strip_query_answered_options_removes_value_already_in_query():
@@ -1393,13 +1118,10 @@ def test_strip_query_answered_options_leaves_untouched_facet_with_only_one_optio
 
 
 def test_check_clarify_facets_strips_query_redundant_option_end_to_end(monkeypatch):
-    async def _fake_search_danawa(query, limit=3):
-        return [
-            {"pcode": "1", "product_name": "스탠리 퀜처 텀블러 887ml", "total_mall_count": None},
-            {"pcode": "2", "product_name": "스탠리 아이스플로우 보틀 473ml", "total_mall_count": None},
-        ]
+    async def _fake_search(query, max_results=20):
+        return [_sr("스탠리 퀜처 텀블러 887ml"), _sr("스탠리 아이스플로우 보틀 473ml")]
 
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
+    monkeypatch.setattr("app.search.search", _fake_search)
 
     async def _fake_extract_facets(query, names):
         return [ClarifyFacet(label="제품분류", options=["텀블러", "보틀"])]
@@ -1411,61 +1133,23 @@ def test_check_clarify_facets_strips_query_redundant_option_end_to_end(monkeypat
     assert result.options.facets == []
 
 
-def test_check_clarify_facets_uses_wider_search_limit_than_the_fast_path(monkeypatch):
-    """사용자 요청(2026-08-12: "브랜드가 2,3개 정도만 뜨는데") 회귀 테스트 -
-    DANAWA_ONLY_SEARCH_LIMIT(3)를 그대로 쓰면 상품명 표본이 3개뿐이라 브랜드가
-    3개를 넘을 수 없었다. check_clarify_facets는 별도로 늘린
-    price_table.CLARIFY_SEARCH_LIMIT을 써야 한다."""
-    from app import price_table as price_table_module
+def test_check_clarify_facets_uses_its_own_search_limit(monkeypatch):
+    """check_clarify_facets는 11번가 search_cache.FETCH_SIZE(20)만큼 검색해
+    facet 추출 표본을 최대한 넓게 잡아야 한다(이보다 크게 요청해도 캐시
+    크기 이상은 못 받는다)."""
+    from app import debate
 
     seen_limits: list[int] = []
 
-    async def _fake_search_danawa(query, limit=3):
-        seen_limits.append(limit)
+    async def _fake_search(query, max_results=20):
+        seen_limits.append(max_results)
         return []
 
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
+    monkeypatch.setattr("app.search.search", _fake_search)
 
     asyncio.run(check_clarify_facets("음료수"))
 
-    assert seen_limits == [price_table_module.CLARIFY_SEARCH_LIMIT]
-    assert price_table_module.CLARIFY_SEARCH_LIMIT > price_table_module.DANAWA_ONLY_SEARCH_LIMIT
-
-
-def test_check_clarify_facets_searches_base_query_instead_of_query(monkeypatch):
-    """속도 개선(2026-08-13: "조금 더 빠르게") - base_query가 오면 그걸로
-    검색해야 한다(캐시 재사용/Crawl-delay 회피가 목적) - query 그대로 검색하면
-    드릴다운마다 매번 새 검색어라 캐시가 안 맞는다."""
-    seen_queries: list[str] = []
-
-    async def _fake_search_danawa(query, limit=3):
-        seen_queries.append(query)
-        return [
-            {"pcode": "1", "product_name": "삼성전자 갤럭시S25 256GB", "total_mall_count": None},
-            {"pcode": "2", "product_name": "삼성전자 갤럭시Z 폴드8 512GB", "total_mall_count": None},
-            {"pcode": "3", "product_name": "삼성전자 갤럭시A57 128GB", "total_mall_count": None},
-            {"pcode": "4", "product_name": "APPLE 아이폰17 256GB", "total_mall_count": None},
-            {"pcode": "5", "product_name": "APPLE 아이폰17 프로 512GB", "total_mall_count": None},
-        ]
-
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
-
-    async def _fake_extract_facets(query, names):
-        return [ClarifyFacet(label="시리즈", options=names)]
-
-    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
-
-    result = asyncio.run(check_clarify_facets("핸드폰 삼성전자", base_query="핸드폰"))
-
-    assert seen_queries == ["핸드폰"]
-    # base_query("핸드폰")의 넓은 표본에서 query("핸드폰 삼성전자")의 추가 단어
-    # "삼성전자"로 로컬 필터링해야 하므로, APPLE 상품은 빠져야 한다(3개 남아
-    # MIN_FILTERED_CLARIFY_ITEMS 이상이라 필터링이 그대로 적용된다).
-    assert result.options.facets[0].options == [
-        "삼성전자 갤럭시S25 256GB",
-        "삼성전자 갤럭시Z 폴드8 512GB",
-        "삼성전자 갤럭시A57 128GB",
-    ]
+    assert seen_limits == [debate._CLARIFY_SEARCH_LIMIT]
 
 
 def test_check_clarify_facets_enriches_minority_brand_series_via_per_brand_extraction(monkeypatch):
@@ -1474,15 +1158,15 @@ def test_check_clarify_facets_enriches_minority_brand_series_via_per_brand_extra
     소수 브랜드(APPLE) 시리즈가 아예 안 나올 수 있다. 브랜드별로 다시 뽑아서
     합쳐야 APPLE 시리즈도 온전히 나온다."""
     items = [
-        {"pcode": "1", "product_name": "삼성전자 갤럭시S26 256GB", "total_mall_count": None},
-        {"pcode": "2", "product_name": "삼성전자 갤럭시Z 폴드8 512GB", "total_mall_count": None},
-        {"pcode": "3", "product_name": "APPLE 아이폰17 256GB", "total_mall_count": None},
+        _sr("삼성전자 갤럭시S26 256GB"),
+        _sr("삼성전자 갤럭시Z 폴드8 512GB"),
+        _sr("APPLE 아이폰17 256GB"),
     ]
 
-    async def _fake_search_danawa(query, limit=3):
+    async def _fake_search(query, max_results=20):
         return items
 
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
+    monkeypatch.setattr("app.search.search", _fake_search)
 
     async def _fake_extract_facets(query, names, required_labels=None):
         # 이 가짜 LLM은 "삼성전자 상품명만 들어오면" 삼성 시리즈만 뽑고(원래
@@ -1544,28 +1228,29 @@ def test_enrich_facets_per_brand_caps_parallel_llm_calls(monkeypatch):
 
 def test_check_clarify_facets_enriches_minority_ecosystem_device_models_via_ecosystem_extraction(monkeypatch):
     """사용자 리포트(2026-08-14: "갤럭시랑 아이폰이랑 비슷한 비율로 기종이 뜨게
-    하고 싶었어" -> "검색어 자체에 문제인거야..?") - 실측 결과 다나와 "핸드폰
-    케이스" 검색 자체가 40개 중 갤럭시 36개/아이폰 1개로 쏠려 있었다. 표본
-    안에서 아무리 잘 나눠도 원본에 아이폰 매물이 거의 없으면 소용없으므로,
-    아이폰 표본이 부족하면(<3개) "아이폰 핸드폰 케이스"로 다나와에 보충 검색을
-    한 번 더 돌려 진짜 아이폰 매물을 가져와야 한다."""
-    base_items = [
-        {"pcode": "1", "product_name": "갤럭시S26 케이스", "total_mall_count": None},
-        {"pcode": "2", "product_name": "갤럭시Z 폴드8 케이스", "total_mall_count": None},
-        {"pcode": "3", "product_name": "갤럭시S25 울트라 케이스", "total_mall_count": None},
-        {"pcode": "4", "product_name": "아이폰17 케이스", "total_mall_count": None},
-    ]
-    # 보충 검색("아이폰 핸드폰 케이스")은 실제 다나와라면 아이폰 매물만 돌려준다
-    # (갤럭시가 안 섞임) - 원래 검색(갤럭시 위주)과 구분해서 흉내낸다.
+    하고 싶었어" -> "검색어 자체에 문제인거야..?") - 실측 결과 검색 자체가 40개
+    중 갤럭시 36개/아이폰 1개로 쏠려 있었다. 표본 안에서 아무리 잘 나눠도
+    원본에 아이폰 매물이 거의 없으면 소용없으므로, 아이폰 표본이 부족하면
+    (<3개) "아이폰 핸드폰 케이스"로 다나와에 보충 검색을 한 번 더 돌려 진짜
+    아이폰 매물을 가져와야 한다(_extract_facets 안의 _enrich_device_models_by_ecosystem
+    은 이 세션에서도 다나와 보충 검색 그대로 쓴다 - check_clarify_facets 자체의
+    주 검색만 11번가로 옮겼다)."""
+    base_items = [_sr("갤럭시S26 케이스"), _sr("갤럭시Z 폴드8 케이스"), _sr("갤럭시S25 울트라 케이스"), _sr("아이폰17 케이스")]
+    # 보충 검색("아이폰 핸드폰 케이스")은 다나와 직접 검색 경로(_ecosystem_name_pool)를
+    # 그대로 타므로, 그 경로만 danawa_search를 모킹한다.
     iphone_supplement_items = [
         {"pcode": "5", "product_name": "아이폰17 케이스", "total_mall_count": None},
         {"pcode": "6", "product_name": "아이폰17 프로 케이스", "total_mall_count": None},
     ]
 
-    async def _fake_search_danawa(query, limit=3):
-        if "아이폰" in query:
-            return iphone_supplement_items
+    async def _fake_search(query, max_results=20):
         return base_items
+
+    monkeypatch.setattr("app.search.search", _fake_search)
+
+    async def _fake_search_danawa(query, limit=3):
+        assert "아이폰" in query
+        return iphone_supplement_items
 
     monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
 
@@ -1604,32 +1289,11 @@ def test_check_clarify_facets_enriches_minority_ecosystem_device_models_via_ecos
     assert "아이폰17 프로" in options
 
 
-def test_check_clarify_facets_falls_back_to_unfiltered_when_too_few_matches(monkeypatch):
-    """필터링 결과가 너무 적으면(MIN_FILTERED_CLARIFY_ITEMS 미만) 필터링을
-    포기하고 base_query의 넓은 표본을 그대로 쓴다 - 추가 검색은 하지 않는다."""
-
-    async def _fake_search_danawa(query, limit=3):
-        return [{"pcode": "1", "product_name": "삼성전자 갤럭시S25 256GB", "total_mall_count": None}]
-
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
-
-    async def _fake_extract_facets(query, names):
-        return [ClarifyFacet(label="시리즈", options=names)]
-
-    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
-
-    result = asyncio.run(check_clarify_facets("핸드폰 없는브랜드", base_query="핸드폰"))
-
-    # "없는브랜드"로 필터링하면 0개가 남아 MIN_FILTERED_CLARIFY_ITEMS(3) 미만이라
-    # 필터링 전 표본(1개)을 그대로 써야 한다 - 빈 리스트가 되면 안 된다.
-    assert result.options.facets[0].options == ["삼성전자 갤럭시S25 256GB"]
-
-
 def test_check_clarify_facets_returns_empty_when_deepseek_finds_nothing(monkeypatch):
-    async def _fake_search_danawa(query, limit=3):
-        return [{"pcode": "1", "product_name": "테스트 상품", "total_mall_count": None}]
+    async def _fake_search(query, max_results=20):
+        return [_sr("테스트 상품")]
 
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
+    monkeypatch.setattr("app.search.search", _fake_search)
     monkeypatch.setattr(
         "app.agents.deepseek.extract_facets_from_names", lambda query, names: asyncio.sleep(0, result=[])
     )
@@ -1643,10 +1307,10 @@ def test_check_clarify_facets_returns_empty_when_deepseek_finds_nothing(monkeypa
 
 
 def test_decide_clarify_endpoint_returns_clarify_response(monkeypatch):
-    async def _fake_search_danawa(query, limit=3):
-        return [{"pcode": "1", "product_name": "코카콜라 350ml", "total_mall_count": None}]
+    async def _fake_search(query, max_results=20):
+        return [_sr("코카콜라 350ml")]
 
-    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
+    monkeypatch.setattr("app.search.search", _fake_search)
 
     async def _fake_extract_facets(query, names):
         return [ClarifyFacet(label="브랜드", options=["코카콜라", "칠성사이다"])]
@@ -1679,7 +1343,9 @@ def test_run_danawa_only_debate_stream_never_calls_deepseek_facets_even_for_shor
     자체는 needs_clarification()을 아예 모른다 - "음료수" 같은 짧은 검색어를 이
     경로로 직접 태워도 extract_facets_from_names가 호출되면 안 된다(LLM 호출 0번
     불변식 유지 확인 - 이 경로 자체는 deepseek.propose 등 다른 LLM 호출도 원래
-    안 하지만, 이 테스트는 새로 추가한 facet 추출 쪽만 특정해서 확인한다)."""
+    안 하지만, 이 테스트는 새로 추가한 facet 추출 쪽만 특정해서 확인한다). 이
+    경로는 다나와 실측 가격표만 쓰는 별도 실험 경로라 여전히 다나와 직접
+    검색을 쓴다(check_clarify_facets의 11번가 전환과 무관)."""
 
     async def _boom(query, names):
         raise AssertionError("run_danawa_only_debate_stream이 facet 추출을 호출했다 - LLM 0회 불변식 위반")
@@ -1708,9 +1374,8 @@ def test_run_debate_routes_to_danawa_only_when_no_llm_key_even_for_short_query(m
     """2026-08-12에 needs_clarification()을 넓히면서 드러난 순서 버그의 회귀
     테스트 - LLM 키가 하나도 없으면(_any_llm_key_configured False) "테스트 상품"
     처럼 이제 clarify로도 보이는 짧은 검색어라도 run_clarify(facet 추출 호출)로
-    새지 않고 그대로 run_danawa_only_debate로 가야 한다. run_clarify는
-    _extract_clarify_options를 거쳐 2026-08-16부터 deepseek.extract_facets_from_names를
-    부른다(예전엔 gpt.extract_options였음 - facet 통합으로 대상이 바뀜)."""
+    새지 않고 그대로 run_danawa_only_debate로 가야 한다. 이 실험 경로는
+    다나와 실측 가격표만 쓴다(check_clarify_facets의 11번가 전환과 무관)."""
     monkeypatch.setattr("app.debate._any_llm_key_configured", lambda: False)
 
     async def _boom_facets(query, product_names, required_labels=None):

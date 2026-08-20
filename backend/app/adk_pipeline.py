@@ -1401,9 +1401,16 @@ async def _finalize_with_danawa(
     return decision, price_table
 
 
-async def run_stream(query: str, skip_clarify: bool = False) -> AsyncIterator[dict[str, Any]]:
+async def run_stream(
+    query: str, skip_clarify: bool = False, persona: dict[str, str] | None = None
+) -> AsyncIterator[dict[str, Any]]:
     """run()과 같은 결과를 만들지만, 단계마다 NDJSON 이벤트를 흘려보낸다 —
     debate.py::run_single_debate_stream이 그대로 재노출.
+
+    persona(2026-08-20, check_clarify_facets 사전 호출 제거의 부작용 방지) -
+    /decide/clarify 사전 호출이 없어지면서, 페르소나 기반 facet 순서 반영이
+    유지되려면 이 파이프라인 내부의 clarify 안전망(_extract_clarify_options
+    호출부, 아래 두 곳)에도 페르소나가 도달해야 한다.
 
     skip_clarify(2026-08 통합 병합) - 프론트의 SearchContext.runTurn이 이미
     브랜드/facet/고정축 선택으로 한 라운드를 좁혀온 후속 턴이면 True로 넘어온다
@@ -1450,7 +1457,11 @@ async def run_stream(query: str, skip_clarify: bool = False) -> AsyncIterator[di
                 # 호출까지 갈 수 있는 무거운 함수라(debate.py 참고), 후속 라운드
                 # (skip_clarify=True)마다 결과를 100% 버리면서도 이 비용을 그대로
                 # 치르고 있었다 - 토큰 절약(2026-08-19)으로 아예 호출을 건너뛴다.
-                clarify = None if skip_clarify else await _extract_clarify_options(query, search_results)
+                clarify = (
+                    None
+                    if skip_clarify
+                    else await _extract_clarify_options(query, search_results, persona)
+                )
                 if (
                     clarify is not None
                     and _is_ambiguous_facets(query, clarify.options.facets)
@@ -1487,7 +1498,7 @@ async def run_stream(query: str, skip_clarify: bool = False) -> AsyncIterator[di
 
     if not proposals:
         search_results = _search_results_from_state(final_state)
-        clarify = await _extract_clarify_options(query, search_results)
+        clarify = await _extract_clarify_options(query, search_results, persona)
         if clarify is not None:
             yield {"type": "final", "result": clarify.model_dump()}
             return
@@ -1551,9 +1562,11 @@ async def run_stream(query: str, skip_clarify: bool = False) -> AsyncIterator[di
     yield {"type": "final", "result": result.model_dump()}
 
 
-async def run(query: str, skip_clarify: bool = False) -> DecideResponse | ClarifyResponse:
+async def run(
+    query: str, skip_clarify: bool = False, persona: dict[str, str] | None = None
+) -> DecideResponse | ClarifyResponse:
     result_dict = None
-    async for event in run_stream(query, skip_clarify=skip_clarify):
+    async for event in run_stream(query, skip_clarify=skip_clarify, persona=persona):
         if event["type"] == "final":
             result_dict = event["result"]
     if result_dict is None:

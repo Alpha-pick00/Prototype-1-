@@ -265,20 +265,39 @@ async def ocr_extract(image: UploadFile) -> OcrExtractResponse:
     return OcrExtractResponse(ocr=ocr_result, cleaned=cleaned)
 
 
+def _compute_persona(request: DecideRequest, user: User | None) -> dict[str, str]:
+    """사용자 페르소나(2026-08-15) - 로그인했으면 계정에 영구 누적된 선호도
+    (app.preferences)를 먼저 깔고, 이번 세션에서 프론트가 들고 있다가 보낸
+    session_preferences로 덮어써 최신 선택을 우선한다. 원래 /decide/clarify
+    전용이었는데, 그 사전 호출을 없애면서(check_clarify_facets 참고) /decide·
+    /decide/stream이 페르소나 반영을 직접 넘겨받아야 한다."""
+    persona: dict[str, str] = {}
+    if user is not None:
+        persona.update(preferences.get_top_preferences(user))
+    if request.session_preferences:
+        persona.update(request.session_preferences)
+    return persona
+
+
 @app.post("/decide", response_model=DecideResult)
-async def decide(request: DecideRequest, background_tasks: BackgroundTasks) -> DecideResult:
+async def decide(
+    request: DecideRequest,
+    background_tasks: BackgroundTasks,
+    user: User | None = Depends(get_optional_user),
+) -> DecideResult:
+    persona = _compute_persona(request, user)
     skip_resolve = False
     try:
         if request.brand:
             result = await run_brand_price(request.query, request.brand)
         elif request.skip_intent_check:
-            result = await run_single_debate(request.query, skip_clarify=True)
+            result = await run_single_debate(request.query, skip_clarify=True, persona=persona)
         else:
             # 정적 최종결과 캐시(decision_cache) 히트면 이미 캡처 시점에 한 번
             # resolve_lowest_price를 거친 링크라 - 다시 부르면 다나와에 실시간
             # 네트워크 호출(~0.5초)이 또 나가 캐시의 속도 이점이 사라진다.
             skip_resolve = decision_cache.lookup(request.query) is not None
-            result = await run_debate(request.query)
+            result = await run_debate(request.query, persona=persona)
     except (RuntimeError, ValueError) as exc:
         # RuntimeError: 제안 전부 실패, ValueError: judge 응답에서 JSON을 못 찾음
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -295,12 +314,15 @@ async def decide(request: DecideRequest, background_tasks: BackgroundTasks) -> D
 
 
 @app.post("/decide/stream")
-async def decide_stream(request: DecideRequest) -> StreamingResponse:
+async def decide_stream(
+    request: DecideRequest, user: User | None = Depends(get_optional_user)
+) -> StreamingResponse:
     """/decide와 같은 일을 하지만, 검색 완료·에이전트별 제안 완료·심사 단계마다
     한 줄씩(NDJSON) 흘려보낸다. 그래야 프론트가 세 에이전트를 다 기다리지 않고
     먼저 끝난 제안부터 화면에 보여줄 수 있다. 응답 헤더가 이미 200으로 나간
     뒤라 실패해도 HTTP 상태 코드를 바꿀 수 없으므로, 에러도 "error" 이벤트로
     흘려보낸다 — 프론트는 이 타입을 보고 에러 처리한다."""
+    persona = _compute_persona(request, user)
 
     async def event_generator():
         try:
@@ -314,9 +336,9 @@ async def decide_stream(request: DecideRequest) -> StreamingResponse:
                 # 히트는 링크를 다시 해석하지 않는다.
                 skip_resolve = not request.skip_intent_check and decision_cache.lookup(request.query) is not None
                 stream = (
-                    run_single_debate_stream(request.query, skip_clarify=True)
+                    run_single_debate_stream(request.query, skip_clarify=True, persona=persona)
                     if request.skip_intent_check
-                    else run_debate_stream(request.query)
+                    else run_debate_stream(request.query, persona=persona)
                 )
                 async for event in stream:
                     if event["type"] == "final":
@@ -347,23 +369,19 @@ async def decide_stream(request: DecideRequest) -> StreamingResponse:
 async def decide_clarify(
     request: DecideRequest, user: User | None = Depends(get_optional_user)
 ) -> ClarifyResponse:
-    """AI 상세검색(2026-08-12) - "음료수"처럼 짧고 애매한 검색어를 다나와 실제
-    검색 상품명에 근거해 DeepSeek이 몇 가지 기준(카테고리/브랜드/용량 등)으로 좁혀나가게
-    제안한다. 프론트는 짧은 검색어에 한해 danawa-only 빠른 경로를 타기 전에 이걸
-    먼저 불러보고, options.facets가 비어 있으면(=명확한 검색어) 그대로 원래
-    빠른 경로로 넘어간다 - 이 엔드포인트 자체가 대부분의 검색어에 대해 검색/LLM
-    호출 없이 즉시 빈 결과로 끝나므로(check_clarify_facets 참고) 매 검색마다
-    호출해도 비용이 거의 없다.
+    """AI 상세검색(2026-08-12) - "음료수"처럼 짧고 애매한 검색어를 실제 검색
+    상품명에 근거해 DeepSeek이 몇 가지 기준(브랜드/용량 등)으로 좁혀나가게
+    제안한다.
 
-    사용자 페르소나(2026-08-15) - 로그인했으면 계정에 영구 누적된 선호도
-    (app.preferences)를 먼저 깔고, 이번 세션에서 프론트가 들고 있다가 보낸
-    session_preferences로 덮어써 최신 선택을 우선한다."""
-    persona: dict[str, str] = {}
-    if user is not None:
-        persona.update(preferences.get_top_preferences(user))
-    if request.session_preferences:
-        persona.update(request.session_preferences)
-    return await check_clarify_facets(request.query, base_query=request.base_query, persona=persona)
+    (2026-08-20) 첫 라운드 사전 체크로 프론트가 매 검색 전에 이 엔드포인트를
+    먼저 부르던 용도는 없앴다 - /decide/stream이 내부적으로 타는 run_clarify()가
+    이제 완전히 동일한 11번가 기반 facet 추출을 수행해 중복이었다(check_clarify_facets
+    독스트링 참고). 지금은 SearchResults.tsx의 AI 상세검색 카드에서 사용자가
+    자유 텍스트를 입력했을 때 facet을 실시간으로 재조회하는 용도로만 쓰인다 -
+    base_query 드릴다운 재사용은 그 용도에서 애초에 안 쓰여서(항상 새 결합
+    검색어로 부른다) 함께 제거했다."""
+    persona = _compute_persona(request, user)
+    return await check_clarify_facets(request.query, persona=persona)
 
 
 @app.post("/decide/danawa-only", response_model=DecideResponse | BulkDecideResponse)

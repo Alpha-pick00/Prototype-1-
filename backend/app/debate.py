@@ -3,7 +3,7 @@ import logging
 import re
 from typing import Any, AsyncIterator
 
-from fetchers import danawa, danawa_search
+from fetchers import danawa
 
 from . import adk_pipeline
 from . import decision_cache
@@ -48,7 +48,9 @@ def _any_llm_key_configured() -> bool:
     return bool(settings.qwen_api_key or settings.groq_api_key or settings.deepseek_api_key)
 
 
-async def run_debate(query: str) -> DecideResponse | BulkDecideResponse | ClarifyResponse:
+async def run_debate(
+    query: str, persona: dict[str, str] | None = None
+) -> DecideResponse | BulkDecideResponse | ClarifyResponse:
     if is_non_product_chitchat(query):
         # 검색/LLM 호출을 아예 안 하고 즉시 실패한다 - is_non_product_chitchat 참고.
         raise RuntimeError(NO_CANDIDATE_ERROR)
@@ -67,11 +69,13 @@ async def run_debate(query: str) -> DecideResponse | BulkDecideResponse | Clarif
         # 버그 - 이 분기가 없었을 땐 우연히 순서가 안 겹쳤을 뿐이었다).
         return await run_danawa_only_debate(query)
     if needs_clarification(query):
-        return await run_clarify(query)
-    return await run_single_debate(query)
+        return await run_clarify(query, persona=persona)
+    return await run_single_debate(query, persona=persona)
 
 
-async def run_debate_stream(query: str) -> AsyncIterator[dict[str, Any]]:
+async def run_debate_stream(
+    query: str, persona: dict[str, str] | None = None
+) -> AsyncIterator[dict[str, Any]]:
     """단일 상품 검색만 단계별 이벤트로 스트리밍한다. bulk/clarify는 흐름 자체가
     다르고(브랜드 목록 선택, 가격대별 정리) 단계를 쪼갤 만한 지점이 마땅치 않아,
     최종 결과 하나만 "final" 이벤트로 보낸다 — 프론트는 이벤트 타입 하나만 보고
@@ -101,10 +105,10 @@ async def run_debate_stream(query: str) -> AsyncIterator[dict[str, Any]]:
             yield event
         return
     if needs_clarification(query):
-        yield {"type": "final", "result": (await run_clarify(query)).model_dump()}
+        yield {"type": "final", "result": (await run_clarify(query, persona=persona)).model_dump()}
         return
 
-    async for event in run_single_debate_stream(query):
+    async for event in run_single_debate_stream(query, persona=persona):
         yield event
 
 
@@ -301,13 +305,6 @@ async def _finalize_danawa_only(
     return DecideResponse(query=original_query or query, proposals=[], decision=decision, price_table=table)
 
 
-# check_clarify_facets()의 base_query 재사용 필터링 전용(사용자 요청, 2026-08-13:
-# "조금 더 빠르게 검색기능이 되면 좋겠어"). 필터링 결과가 이보다 적으면 표본이
-# 너무 좁아 facet 품질이 나빠질 수 있으니, 필터링을 포기하고 base_query의
-# 넓은 표본을 그대로 쓴다(추가 검색은 하지 않는다 - 속도가 이 최적화의 목적이라
-# 여기서 또 search.danawa.com을 때리면 본전도 못 찾는다).
-MIN_FILTERED_CLARIFY_ITEMS = 3
-
 # _enrich_facets_per_brand가 브랜드당 병렬 DeepSeek 호출을 최대 몇 개까지
 # 내보낼지(토큰 절약, 2026-08-19) - brand_facet.options는 이미 인기순이라
 # 상위 몇 개만 보강해도 실사용 대부분을 커버한다. 표시되는 브랜드 목록
@@ -318,26 +315,6 @@ _MAX_BRAND_ENRICH_FANOUT = 6
 
 def _normalize_for_match(text: str) -> str:
     return re.sub(r"\s+", "", text).lower()
-
-
-def _filter_items_by_extra_terms(
-    items: list[danawa_search.DanawaSearchItem], query: str, base_query: str
-) -> list[danawa_search.DanawaSearchItem]:
-    """base_query로 얻은(캐시 재사용) 넓은 표본을, 사용자가 그 뒤에 덧붙인
-    단어들(예: base_query="핸드폰", query="핸드폰 삼성전자"의 "삼성전자")로
-    상품명을 걸러 좁힌다 - 네트워크 요청 없이 순수 로컬 필터링."""
-    base_tokens = {_normalize_for_match(t) for t in base_query.split()}
-    extra_tokens = [
-        _normalize_for_match(t) for t in query.split() if _normalize_for_match(t) not in base_tokens
-    ]
-    if not extra_tokens:
-        return items
-    filtered = [
-        item
-        for item in items
-        if all(term in _normalize_for_match(item["product_name"]) for term in extra_tokens)
-    ]
-    return filtered if len(filtered) >= MIN_FILTERED_CLARIFY_ITEMS else items
 
 
 def _items_for_brand(brand: str, names: list[str]) -> list[str]:
@@ -719,37 +696,45 @@ def _strip_query_answered_options(query: str, facets: list[ClarifyFacet]) -> lis
     return result
 
 
+# 11번가 search_cache.FETCH_SIZE(20)와 동일 - search()가 어차피 이 크기로
+# 캐시해두므로 이보다 크게 요청해도 이득이 없다(다나와 시절엔 한 페이지에서
+# 훨씬 많은 상품을 한 번에 긁을 수 있어 CLARIFY_SEARCH_LIMIT=90처럼 크게
+# 잡았지만, 11번가는 페이지당 상한이 훨씬 낮다).
+_CLARIFY_SEARCH_LIMIT = 20
+
+
 async def check_clarify_facets(
-    query: str, base_query: str | None = None, persona: dict[str, str] | None = None
+    query: str, persona: dict[str, str] | None = None
 ) -> ClarifyResponse:
-    """AI 상세검색(2026-08-12 요청) - "음료수"처럼 짧고 애매한 검색어를 다나와
-    실제 검색 결과 상품명에 근거해 몇 가지 기준(facet)으로 좁혀나가도록 DeepSeek에게
+    """AI 상세검색(2026-08-12 요청) - "음료수"처럼 짧고 애매한 검색어를 실제
+    검색 결과 상품명에 근거해 몇 가지 기준(facet)으로 좁혀나가도록 DeepSeek에게
     물어본다(원래 Qwen으로 붙였다가, Model Studio 계정의 과금 플랜 활성화 문제로
     이미 키가 있고 바로 되는 DeepSeek로 옮겼다). run_danawa_only_debate()/
     run_danawa_only_debate_stream()과는 완전히 분리된 별도 진입점이다 - 그 둘은
     "LLM 호출 0번"이 테스트로 고정된 불변식이라(test_run_danawa_only_debate_never_calls_any_llm)
-    여기서 DeepSeek를 부르는 로직을 거기 안에 섞으면 안 된다. 프론트가 이 함수를
-    먼저(짧은 쿼리에 한해) 호출해보고, facets가 비어 있으면(=명확한 검색어이거나
-    DeepSeek 호출 실패) 그대로 danawa-only 빠른 경로로 진행한다.
+    여기서 DeepSeek를 부르는 로직을 거기 안에 섞으면 안 된다.
+
+    (2026-08-20, "다나와 기능에 있던 모든걸 옮겼어야지 왜 안옮긴거야") 메인
+    결정 파이프라인(adk_pipeline)은 이미 11번가로 전환됐는데 이 함수만 여전히
+    다나와 직접 스크래핑(search.danawa.com, robots.txt Crawl-delay 10초)에
+    의존하고 있었다 - 검색을 search_module.search()(11번가 오픈API, 이미
+    search_cache로 캐시됨)로 통일했다. base_query 재사용/카테고리 표본
+    좁히기는 다나와의 느린 검색을 우회하려던 최적화였는데(1시간 캐시, 10초
+    지연 회피), 11번가는 훨씬 빠르고 이미 캐시되므로 함께 제거했다 - "카테고리"
+    facet 자체도 이미 없앤 상태라(아래 참고) 표본을 카테고리로 좁힐 대상도
+    더 이상 없다.
+
+    프론트에서 이 함수를 부르는 곳은 이제 SearchResults.tsx의 AI 상세검색
+    카드 하나뿐이다(자유 텍스트 입력 시 facet을 실시간 재조회) - 원래
+    SearchContext.tsx의 첫 라운드 사전 체크에서도 불렀는데, run_clarify()
+    (아래, /decide/stream이 내부적으로 타는 경로)가 이제 완전히 동일한
+    11번가 기반 facet 추출을 수행하고 있어 그 사전 체크는 순수 중복
+    호출이었다 - 제거하고 /decide/stream 하나로 합쳤다.
 
     needs_clarification()이 False면 검색조차 하지 않고 즉시 빈 결과를 반환한다 -
-    대부분의(구체적인) 검색어는 이 함수를 호출해도 search.danawa.com 요청도,
-    DeepSeek 호출도 전혀 없이 즉시 끝난다.
-
-    "하이"처럼 상품과 무관한 인사말/잡담도 같은 이유로 즉시 빈 결과를 반환한다
-    (사용자 요청, 2026-08-15: "상품으로 인식못하는 말을 들으면 처리해야하는
-    속도를 높여줘") - 이런 입력은 needs_clarification()이 짧은 검색어 휴리스틱에
-    걸려 True가 되므로, 이 가드가 없으면 search.danawa.com의 10초 Crawl-delay와
-    DeepSeek facet 추출까지 그대로 타 버린다(프론트가 /decide/stream보다 먼저
-    이 엔드포인트를 호출하므로 실제 체감 지연의 대부분이 여기서 생겼다).
-
-    base_query(2026-08-13, 속도 개선) - 여러 라운드에 걸쳐 좁혀나갈 때(예: "핸드폰"
-    -> "핸드폰 삼성전자" -> ...) 프론트가 그 드릴다운의 맨 처음 검색어를 실어 보낸다.
-    query 대신 base_query로 검색하면 search.danawa.com의 1시간 캐시(fetchers.
-    danawa_search._cache)가 맞을 확률이 높아 10초 Crawl-delay를 건너뛰고, 그 결과를
-    query에서 base_query에 없는 단어들로 로컬 필터링해 재사용한다 - 실제 최종
-    가격 조회(run_danawa_only_debate*)는 이 캐시/필터링을 안 쓰고 항상 정확한
-    검색을 새로 한다.
+    대부분의(구체적인) 검색어는 이 함수를 호출해도 검색도 DeepSeek 호출도
+    전혀 없이 즉시 끝난다. "하이"처럼 상품과 무관한 인사말/잡담도 같은 이유로
+    즉시 빈 결과를 반환한다.
 
     정적 facet 캐시(2026-08-16, 속도 개선) - "아이폰"처럼 자주 검색될 유명
     카테고리는 facet_cache.lookup()이 정규식 매칭만으로 즉시 답한다(검색도
@@ -763,143 +748,23 @@ async def check_clarify_facets(
         static_facets = _strip_query_answered_options(query, static_facets)
         return ClarifyResponse(query=query, options=ClarifyOptions(facets=static_facets))
 
-    search_query = base_query if base_query and base_query.strip() else query
+    search_query = query
     # (2026-08-20, "'안녕 충전기 살래' 했는데도 적절한 상품을 못찾았다") -
     # 이 함수는 adk_pipeline의 refine LlmAgent를 거치지 않는 완전히 별도
     # 경로라, "안녕"/"살래" 같은 인사말·구매의도 문구가 정제 없이 그대로
-    # 다나와 검색어로 들어가면서 검색 자체가 잘 안 됐다. adk_pipeline의
+    # 11번가 keyword로 들어가면 검색 자체가 잘 안 된다. adk_pipeline의
     # 조건부 refine과 같은 기준(looks_conversational_query)으로만 좁혀서,
     # 이미 짧고 깨끗한 검색어("음료수" 등)는 여전히 이 호출을 건너뛴다.
     if looks_conversational_query(search_query):
         search_query = await groq.refine_query(search_query)
-    items = await price_table_module._search_danawa_items(
-        search_query, limit=price_table_module.CLARIFY_SEARCH_LIMIT
-    )
-    # items가 비었으면(검색 실패/차단) 카테고리 집계도 같은 이유로 비어있을
-    # 것이므로 굳이 다시 부르지 않는다 - 실패한 요청은 캐시되지 않아서
-    # (danawa_search._fetch_entry) 여기서 또 부르면 이미 실패한 요청을
-    # 그대로 재시도해 불필요한 지연만 늘린다.
-    categories = await price_table_module._search_danawa_categories(search_query) if items else []
-
-    effective_category = _select_effective_category_name(query, categories)
-    if effective_category:
-        # 카테고리를 이미 골랐으면(질의 텍스트에 그 이름이 있으면) 브랜드
-        # 전체 표본이 아니라 그 카테고리로 좁힌 실제 표본으로 나머지
-        # facet(모델/용량 등)을 뽑는다 - 안 그러면 브랜드 전체 표본에는
-        # 그 카테고리 상품이 아예 없을 수 있어(예: "샤오미" 상위 40개엔
-        # 휴대폰이 하나도 없다) "모델" 같은 축이 전혀 다른 카테고리 상품으로
-        # 채워진다(2026-08-18 사용자 리포트: "공기청정기 · 미 패드5처럼
-        # 존재하지 않는 상품으로 매핑돼"). 이렇게 표본 자체를 카테고리로
-        # 좁혀두면, 그 안에서 다시 계산되는 _attach_facet_crossfilter가
-        # "모델을 고르면 용량도 그에 맞게 좁혀지는" 것까지 자연히 따라온다 -
-        # 표본이 이미 그 카테고리 상품뿐이라 별도 로직이 필요 없다.
-        # search.danawa.com Crawl-delay(10초)를 이 라운드에 한 번 더
-        # 감수한다 - _ecosystem_name_pool과 같은 트레이드오프.
-        category_items = await price_table_module._search_danawa_items(
-            f"{search_query} {effective_category}", limit=price_table_module.CLARIFY_SEARCH_LIMIT
-        )
-        if len(category_items) >= MIN_FILTERED_CLARIFY_ITEMS:
-            items = category_items
-
-    if base_query and base_query.strip() and base_query.strip() != query.strip():
-        items = _filter_items_by_extra_terms(items, query, base_query)
-    names = [item["product_name"] for item in items]
+    try:
+        results = await search_module.search(search_query, max_results=_CLARIFY_SEARCH_LIMIT)
+    except Exception:
+        results = []
+    names = [r.title for r in _filter_listing_pages(results)]
     facets = await _extract_facets(query, names, persona)
     facets = _strip_query_answered_options(query, facets)
-    # (2026-08-20, "카테고리 선택 안 하게 만들고" / "그냥 AI상세검색에서
-    # '카테고리'라는거를 없애") 예전엔 여기서 _apply_category_breakdown()이
-    # 다나와 실측 카테고리 집계로 "카테고리" facet을 주입해 되물었다 -
-    # "이프로"처럼 브랜드만 봐도 카테고리가 명백한 질의에도 "카테고리에서
-    # 음료를 고르세요"라고 불필요하게 되묻는 문제가 있어 뺐다. 이어서
-    # "초코파이"처럼 DeepSeek이 프롬프트 지시와 무관하게 스스로 "카테고리"
-    # facet(검색어 자체를 되묻는 값들)을 또 만들어내는 사례가 실측돼,
-    # _extract_facets 안에서 label=="카테고리"인 facet 자체를 한 번 더
-    # 걸러내도록 했다(위 함수 안 주석 참고) - 그래서 "카테고리" facet은
-    # 이제 어떤 경로로도 응답에 남지 않는다. _apply_category_breakdown/
-    # _category_breakdown_facet 함수 정의는 남아있지만 이제 호출부가 없다.
-    # 용량(ml) 등 DeepSeek이 스스로 뽑은 다른 facet은 그대로 유지된다 -
-    # categories 표본으로 다른 facet을 좁히는 로직(_select_effective_
-    # category_name, 위쪽에서 이미 호출됨)에는 영향 없다.
     return ClarifyResponse(query=query, options=ClarifyOptions(facets=facets))
-
-
-def _select_category_group(
-    query: str, groups: list[danawa_search.DanawaCategoryGroup]
-) -> danawa_search.DanawaCategoryGroup | None:
-    """이전 라운드에서 사용자가 카테고리 하나를 이미 골라 질의 텍스트에 그
-    이름이 그대로 들어있으면 그 카테고리를 돌려준다(_facet_resolved와 같은
-    텍스트 포함 판정). 여러 개가 동시에 부분 문자열로 걸리면(예: "태블릿/
-    휴대폰"을 고른 뒤에도 "태블릿"이라는 별개 중분류 이름이 그 안에 우연히
-    포함돼 같이 매치됨) 가장 긴(=가장 구체적인) 이름을 우선한다."""
-    matched = [g for g in groups if g["name"].casefold() in query.casefold()]
-    if not matched:
-        return None
-    return max(matched, key=lambda g: len(g["name"]))
-
-
-def _select_effective_category_name(
-    query: str, categories: list[danawa_search.DanawaCategoryGroup]
-) -> str | None:
-    """이미 고른 카테고리 중 가장 구체적인(중분류 > 대분류) 이름을 돌려준다 -
-    대분류/중분류 둘 다 같은 다나와 응답에 이미 들어있어(parse_category_breakdown)
-    추가 조회 없이 판단 가능하다. 이 이름을 브랜드 질의에 붙여 다나와를 다시
-    검색하면(check_clarify_facets) "모델"/"용량" 등 나머지 facet이 그
-    카테고리에 실제로 속하는 상품만으로 뽑힌다."""
-    top = _select_category_group(query, categories)
-    if top is None:
-        return None
-    # top["name"] 자체가 우연히 자기 중분류 이름을 부분 문자열로 포함할 수
-    # 있다(예: 대분류 "태블릿/휴대폰"은 중분류 "휴대폰"을 이미 포함한다) - 그
-    # 부분을 지우고 나머지에서만 중분류를 찾아야, 대분류만 고른 상태(아직
-    # 중분류는 안 고름)를 중분류까지 고른 것으로 착각하지 않는다.
-    remainder = query.casefold().replace(top["name"].casefold(), "", 1)
-    sub = _select_category_group(remainder, top["subcategories"])
-    return sub["name"] if sub is not None else top["name"]
-
-
-def _category_breakdown_facet(
-    query: str, categories: list[danawa_search.DanawaCategoryGroup]
-) -> ClarifyFacet | None:
-    """다나와 검색결과의 실측 카테고리 집계로 "카테고리" facet을 만든다
-    (2026-08-18 사용자 리포트: "샤오미"를 검색하면 AI 상세검색 카테고리에
-    휴대폰이 안 나온다 - DeepSeek이 보는 상품명 표본(_extract_facets, 최대
-    90개)이 다나와 검색 순위 상위권에 쏠려서, 특정 대분류 상품이 표본에 아예
-    안 걸리면 그 카테고리는 영원히 못 본다). 이 집계는 표본이 아니라 다나와
-    자체 카테고리 색인이라 표본 편향에서 자유롭다. 대분류가 2개 미만이면
-    (=애초에 여러 카테고리로 안 갈린다는 뜻) None."""
-    selected = _select_category_group(query, categories)
-    if selected is None:
-        groups = categories
-    else:
-        # selected["name"](대분류) 자체가 우연히 자기 중분류 이름을 부분
-        # 문자열로 포함할 수 있다(예: 대분류 "태블릿/휴대폰"은 중분류
-        # "휴대폰"을 이미 포함한다) - 그 부분을 지운 나머지에서만 "이미 고른
-        # 중분류"를 판정해야, 대분류만 고른 시점(아직 중분류는 안 고름)에
-        # 그 안에 우연히 포함된 중분류 옵션이 "이미 답함"으로 잘못 사라지지
-        # 않는다(_select_effective_category_name과 같은 이유).
-        remainder = query.casefold().replace(selected["name"].casefold(), "", 1)
-        groups = [g for g in selected["subcategories"] if g["name"].casefold() not in remainder]
-    groups = [g for g in groups if g["count"] > 0]
-    if len(groups) < 2:
-        return None
-    groups = sorted(groups, key=lambda g: g["count"], reverse=True)
-    return ClarifyFacet(label="카테고리", options=[g["name"] for g in groups])
-
-
-def _apply_category_breakdown(
-    facets: list[ClarifyFacet], query: str, categories: list[danawa_search.DanawaCategoryGroup]
-) -> list[ClarifyFacet]:
-    """DeepSeek이 뽑은 facets에 실측 카테고리 facet을 끼워 넣는다 - DeepSeek이
-    이미 "카테고리"(또는 동의어) 라벨로 뭔가 뽑았으면 그 옵션을 실측값으로
-    교체하고, 없으면 맨 앞에 새로 추가한다(카테고리는 가장 상위 질문이라
-    다른 축보다 먼저 물어보는 게 자연스럽다)."""
-    injected = _category_breakdown_facet(query, categories)
-    if injected is None:
-        return facets
-    result = [injected if f.label == injected.label else f for f in facets]
-    if not any(f.label == injected.label for f in facets):
-        result.insert(0, injected)
-    return result
 
 
 def _facet_options_for_query(query: str, facet: ClarifyFacet) -> list[str]:
@@ -967,7 +832,9 @@ def _filter_listing_pages(results: list[SearchResult]) -> list[SearchResult]:
     return [r for r in results if not is_generic_listing_url(r.url)]
 
 
-async def _extract_clarify_options(query: str, results: list[SearchResult]) -> ClarifyResponse | None:
+async def _extract_clarify_options(
+    query: str, results: list[SearchResult], persona: dict[str, str] | None = None
+) -> ClarifyResponse | None:
     """검색 결과 제목에서 facet(임의 기준)을 뽑아본다. 아무것도 못 찾으면 None.
     이미 가져온 검색 결과를 그대로 받아 재검색하지 않는다 — run_single_debate가
     전체 실패했을 때 같은 결과로 이 함수를 다시 시도하는 용도로도 쓰인다.
@@ -1004,7 +871,7 @@ async def _extract_clarify_options(query: str, results: list[SearchResult]) -> C
     else:
         filtered_results = _filter_listing_pages(results)
         names = [r.title for r in filtered_results]
-        facets = await _extract_facets(query, names)
+        facets = await _extract_facets(query, names, persona)
     if _resolved_facet_count(query, facets) >= _MAX_CLARIFY_ROUNDS:
         return None
     facets = _strip_resolved_facets(query, facets)
@@ -1014,7 +881,7 @@ async def _extract_clarify_options(query: str, results: list[SearchResult]) -> C
 
 
 async def run_single_debate(
-    query: str, skip_clarify: bool = False
+    query: str, skip_clarify: bool = False, persona: dict[str, str] | None = None
 ) -> DecideResponse | ClarifyResponse:
     """정제→검색→제안(GPT·Gemini·DeepSeek 병렬)→필터링+병합→검증→매칭→심사
     역할 분리 파이프라인 — 실제 오케스트레이션은 adk_pipeline(ADK SequentialAgent)이
@@ -1022,17 +889,23 @@ async def run_single_debate(
     얇은 래퍼.
 
     skip_clarify(2026-08 통합 병합) - adk_pipeline.run() 참고. 이미 한 라운드
-    이상 답한 후속 턴에서 내부 애매함 판정이 다시 clarify를 띄우는 걸 막는다."""
-    return await adk_pipeline.run(query, skip_clarify=skip_clarify)
+    이상 답한 후속 턴에서 내부 애매함 판정이 다시 clarify를 띄우는 걸 막는다.
+
+    persona(2026-08-20, check_clarify_facets 사전 호출 제거의 부작용 방지) -
+    이전엔 페르소나 기반 facet 순서 반영이 /decide/clarify 사전 호출에서만
+    일어났는데, 그 사전 호출을 없애면서 이 파이프라인 내부의 clarify 안전망
+    (adk_pipeline._extract_clarify_options 호출)까지 관통시켜야 페르소나
+    기능이 유지된다."""
+    return await adk_pipeline.run(query, skip_clarify=skip_clarify, persona=persona)
 
 
 async def run_single_debate_stream(
-    query: str, skip_clarify: bool = False
+    query: str, skip_clarify: bool = False, persona: dict[str, str] | None = None
 ) -> AsyncIterator[dict[str, Any]]:
     """run_single_debate와 같은 결과를 만들지만, 파이프라인 단계마다(정제/검색/
     제안/검증/심사) NDJSON 이벤트를 흘려보낸다 — adk_pipeline.run_stream이 실제
     오케스트레이션과 이벤트 번역을 담당."""
-    async for event in adk_pipeline.run_stream(query, skip_clarify=skip_clarify):
+    async for event in adk_pipeline.run_stream(query, skip_clarify=skip_clarify, persona=persona):
         yield event
 
 
@@ -1103,27 +976,46 @@ async def run_bulk_debate(query: str) -> BulkDecideResponse | DecideResponse | C
     )
 
 
-async def run_clarify(query: str) -> DecideResponse | ClarifyResponse:
+async def run_clarify(
+    query: str, persona: dict[str, str] | None = None
+) -> DecideResponse | ClarifyResponse:
+    """run_debate()/run_debate_stream()이 needs_clarification()으로 이 질의가
+    애매하다고 판단했을 때 타는 경로 - 11번가로 검색해 facet을 뽑아보고, 없으면
+    run_single_debate로 넘긴다.
+
+    (2026-08-20, "'안녕 충전기 살래' 했는데도 적절한 상품을 못찾았다" 재발
+    방지) 이 함수는 check_clarify_facets와 별개로 원래부터 11번가로 검색했지만
+    (다나와가 아니다), "안녕"/"살래" 같은 인사말·구매의도 문구를 정제 없이
+    그대로 11번가 keyword로 넘기고 있었다 - check_clarify_facets가 이 문제를
+    먼저 겪고 고쳤던 것과 같은 버그가 이 경로에도 잠재해 있었다(그동안
+    check_clarify_facets가 프론트의 사전 호출로 먼저 가로채서 드러나지
+    않았을 뿐). 그 사전 호출을 없앤 지금은 이 경로가 직접 노출되므로 같은
+    조건부 refine을 여기도 적용한다. facet 매칭(_extract_clarify_options)은
+    사용자가 실제로 입력한 원문(query)을 그대로 써야 "이미 답한 축"을 올바로
+    판정할 수 있어 정제하지 않는다 - refine은 검색어(search_query)에만 쓴다."""
+    search_query = query
+    if looks_conversational_query(query):
+        search_query = await groq.refine_query(query)
     try:
-        results = await search_module.search(query, max_results=10)
+        results = await search_module.search(search_query, max_results=10)
     except Exception:
         results = []
 
-    clarify = await _extract_clarify_options(query, results)
+    clarify = await _extract_clarify_options(query, results, persona)
     if clarify is not None:
         return clarify
 
     if not results:
-        # 다나와 검색 자체가 이 질의에 대해 아무것도 못 찾았다 - run_single_debate가
-        # 정제해서 다시 검색해도 같은 검색 엔진, 거의 같은 검색어라 또 아무것도
-        # 못 찾을 가능성이 매우 높다(사용자 요청, 2026-08-15: "다른 쓸데없는 말
-        # 하니까 왜이리 오래걸려" - is_non_product_chitchat이 못 잡는, 상품과
-        # 무관한 임의의 텍스트까지 이 증거 기반 신호로 일반적으로 빠르게 실패
-        # 처리한다). 검색+제안 3개+검증+심사 전체를 다시 태우는 대신 바로
-        # 정직하게 포기한다.
+        # 11번가 검색 자체가 이 질의에 대해 아무것도 못 찾았다(정제까지 거친
+        # 뒤인데도) - run_single_debate가 다시 검색해도 같은 검색엔진, 같은
+        # 정제 결과라 또 아무것도 못 찾을 가능성이 매우 높다(사용자 요청,
+        # 2026-08-15: "다른 쓸데없는 말 하니까 왜이리 오래걸려" - is_non_product_chitchat이
+        # 못 잡는, 상품과 무관한 임의의 텍스트까지 이 증거 기반 신호로 일반적으로
+        # 빠르게 실패 처리한다). 검색+제안+검증+심사 전체를 다시 태우는 대신
+        # 바로 정직하게 포기한다.
         raise RuntimeError(NO_CANDIDATE_ERROR)
 
-    return await run_single_debate(query)
+    return await run_single_debate(query, persona=persona)
 
 
 async def run_brand_price(query: str, brand: str) -> BrandPriceResponse:

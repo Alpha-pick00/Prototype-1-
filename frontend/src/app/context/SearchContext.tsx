@@ -1,6 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import {
-  checkClarifyFacets,
   decide,
   decideStream,
   extractOcr,
@@ -8,7 +7,6 @@ import {
   saveServerHistory,
   deleteServerHistoryEntry,
   clearServerHistory,
-  looksAmbiguous,
   recordPreference,
   ApiError,
   type DecideResult,
@@ -45,9 +43,12 @@ export interface ChatTurn {
   displayQuery: string;
   requestQuery: string;
   brand?: string;
-  // AI 상세검색 드릴다운 체인의 맨 처음 검색어(속도 개선, 2026-08-13) - "핸드폰"
-  // -> "핸드폰 삼성전자"로 좁혀가는 동안 이 값은 계속 "핸드폰"으로 고정된다.
-  // checkClarifyFacets가 이걸 base_query로 보내 백엔드 캐시를 재사용한다.
+  // AI 상세검색 드릴다운 체인의 맨 처음 검색어 - "핸드폰" -> "핸드폰 삼성전자"로
+  // 좁혀가는 동안 이 값은 계속 "핸드폰"으로 고정된다. requestQuery와 다르면
+  // (=드릴다운 후속 턴이면) skipIntentCheck를 계산해 /decide/stream에
+  // skip_intent_check로 보내 백엔드의 재질문 재판정을 건너뛴다. (2026-08-20)
+  // 원래는 checkClarifyFacets의 base_query 캐시 재사용에도 쓰였는데, 그
+  // 사전 호출 자체가 없어지면서 그 용도는 없어졌다.
   baseQuery: string;
   status: TurnStatus;
   result: DecideResult | null;
@@ -313,23 +314,16 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
     const skipIntentCheck = requestQuery !== (baseQuery ?? requestQuery);
 
     try {
-      // AI 상세검색(2026-08-12) - "음료수"처럼 짧고 애매한 검색어면 다나와 실측
-      // 가격 스트림을 바로 태우기 전에 먼저 물어본다. looksAmbiguous()가
-      // 대부분의(구체적인) 검색어를 걸러내므로 이 호출 자체가 거의 항상 스킵된다.
-      // 실패해도(.catch) 조용히 원래 검색으로 넘어간다 - AI 상세검색은 있으면
-      // 좋은 보조 기능이지 필수 경로가 아니다. 후속 턴(skipIntentCheck)에서는
-      // 이미 한 축을 답했으므로 다시 묻지 않는다.
-      if (!skipIntentCheck && looksAmbiguous(requestQuery)) {
-        const persona = { ...sessionPreferences, ...personaOverride };
-        const clarify = await checkClarifyFacets(requestQuery, baseQuery, persona, getStoredToken()).catch(
-          () => null
-        );
-        if (clarify && clarify.options.facets.length > 0) {
-          patchTurn(id, { status: 'result', result: clarify });
-          return;
-        }
-      }
-
+      // (2026-08-20, "다나와 기능에 있던 모든걸 옮겼어야지") 원래 여기서
+      // looksAmbiguous()면 다나와 실측 가격 스트림을 태우기 전에 checkClarifyFacets
+      // (/decide/clarify)를 먼저 불렀다 - 백엔드가 다나와 → 11번가로 전환되면서
+      // /decide/stream이 내부적으로 타는 run_clarify()가 이제 완전히 동일한
+      // 11번가 기반 facet 추출을 이미 수행하고 있어(app.debate.check_clarify_facets
+      // 독스트링 참고) 이 사전 호출은 매 첫 라운드마다 순수 중복 왕복이었다 -
+      // 제거하고 /decide/stream 하나로 합친다. checkClarifyFacets 자체는
+      // SearchResults.tsx의 AI 상세검색 카드(자유 텍스트 입력 시 facet 실시간
+      // 재조회)에서 계속 쓰인다.
+      const persona = { ...sessionPreferences, ...personaOverride };
       let finalResult: DecideResult | null = null;
       let streamError: string | null = null;
       await decideStream(
@@ -347,7 +341,9 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
         },
         undefined,
         undefined,
-        skipIntentCheck
+        skipIntentCheck,
+        persona,
+        getStoredToken()
       );
 
       if (streamError || !finalResult) {

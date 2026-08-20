@@ -109,18 +109,21 @@ class DecideRequest(BaseModel):
     # 중인데, 예컨대 "80ml"처럼 용량이 붙은 재검색어가 새 대량구매 질의로
     # 오판되는 걸 막기 위함.
     skip_intent_check: bool = False
-    # /decide/clarify 전용(app.debate.check_clarify_facets) - AI 상세검색을
-    # 여러 턴에 걸쳐 좁혀나갈 때(예: "핸드폰" -> "핸드폰 삼성전자") 매 라운드마다
-    # search.danawa.com을 새로 때리면 10초 Crawl-delay가 매번 붙어 느리다.
-    # base_query에 그 드릴다운의 맨 처음 검색어(이미 캐시됐을 가능성이 높다)를
-    # 넘기면, 백엔드가 그걸로 검색해 캐시를 재사용하고 나머지는 로컬 필터링만
-    # 한다 - 다른 엔드포인트는 이 필드를 무시한다.
+    # /decide/danawa-only 전용(app.debate.run_danawa_only_debate) - 여러 턴에
+    # 걸쳐 좁혀나갈 때(예: "핸드폰" -> "핸드폰 삼성전자") 그 드릴다운의 맨
+    # 처음 검색어를 넘기면, 다나와 검색이 빈손일 때 이 값으로 한 번 더
+    # 시도하는 폴백에 쓰인다 - 다른 엔드포인트는 이 필드를 무시한다.
+    # (2026-08-20) 원래 /decide/clarify(app.debate.check_clarify_facets)의
+    # 다나와 검색 캐시 재사용에도 쓰였는데, check_clarify_facets가 11번가
+    # 기반으로 바뀌면서(search_cache가 이미 캐시하므로) 그 용도는 없어졌다.
     base_query: str | None = None
-    # /decide/clarify 전용(2026-08-15, 사용자 페르소나 기반 상품 매핑) - 로그인
+    # 사용자 페르소나(2026-08-15, 사용자 페르소나 기반 상품 매핑) - 로그인
     # 여부와 무관하게 "이번 세션에서 지금까지 고른 값들"을 {facet 라벨: 값}으로
     # 프론트가 누적해 매 요청에 실어 보낸다. 로그인 계정의 영구 선호도
     # (app.preferences)와 병합해 facet 옵션 순서에 소프트하게 반영한다 - 세션
-    # 값이 계정 값보다 최신이라 우선한다.
+    # 값이 계정 값보다 최신이라 우선한다. (2026-08-20) 원래 /decide/clarify
+    # 전용이었는데, 그 사전 호출을 없애면서(main.py::_compute_persona 참고)
+    # /decide·/decide/stream도 이 필드를 함께 읽는다.
     session_preferences: dict[str, str] | None = None
 
 

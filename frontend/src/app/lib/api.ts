@@ -143,34 +143,18 @@ export interface OcrExtractResponse {
 
 export class ApiError extends Error {}
 
-// AI 상세검색(2026-08-12) - "음료수"처럼 짧고 애매한 검색어를 다나와 검색 결과에
-// 근거해 DeepSeek이 카테고리/브랜드/용량 같은 기준(facet)으로 좁혀나가도록 제안한다.
+// AI 상세검색(2026-08-12) - "음료수"처럼 짧고 애매한 검색어를 실제 검색 결과에
+// 근거해 DeepSeek이 브랜드/용량 같은 기준(facet)으로 좁혀나가도록 제안한다.
 // 백엔드가 needs_clarification()으로 한 번 더 걸러서, 명확한 검색어면 검색/LLM
 // 호출 없이 즉시 facets: []로 끝난다(app/debate.py::check_clarify_facets 참고).
 //
-// looksAmbiguous()는 그 백엔드 검사(backend/app/intent.py::_is_short_bare_query)를
-// 그대로 흉내낸 순수 클라이언트 프리필터다 - 명백히 구체적인 검색어(숫자가 있거나
-// 단어가 5개 이상)에 대해서는 이 API를 아예 호출하지 않아서, 거의 모든 검색에서
-// 왕복 하나조차 안 생기게 한다. 오탐(애매한데 여기서 걸러짐)이 있어도 위험하지
-// 않다 - 그런 경우 사용자는 그냥 원래 검색 경로로 바로 넘어갈 뿐이다.
-//
-// 2 -> 4(2026-08-15, 카테고리별 메타데이터 차이 - "냉장고 살 때랑 콜라 살 때
-// 쓰는 메타데이터가 다르다") - intent.py::SHORT_QUERY_TOKEN_LIMIT과 함께 넓혀서
-// "삼성 냉장고 스탠드형"처럼 짧지만 구체성이 붙기 시작한 질의도 AI 상세검색
-// (카테고리별 동적 facet)을 먼저 시도하도록 한다.
-const HAS_DIGIT_PATTERN = /\d/;
-
-export function looksAmbiguous(query: string): boolean {
-  const trimmed = query.trim();
-  if (!trimmed) return false;
-  const tokens = trimmed.split(/\s+/);
-  return tokens.length <= 4 && !HAS_DIGIT_PATTERN.test(trimmed);
-}
-
-// baseQuery(2026-08-13, "조금 더 빠르게" 요청) - 드릴다운 중(예: "핸드폰" ->
-// "핸드폰 삼성전자")이면 그 체인의 맨 처음 검색어를 실어 보낸다. 백엔드가 매
-// 라운드 새로 search.danawa.com을 때리는(10초 Crawl-delay) 대신 이미 캐시된
-// base_query 결과를 재사용해 로컬 필터링만 하게 해준다(app/debate.py::check_clarify_facets).
+// (2026-08-20) 원래는 첫 라운드마다 looksAmbiguous()로 걸러 이 API를 사전
+// 호출하고, facet이 있으면 decideStream 전에 먼저 보여줬다 - decideStream이
+// 내부적으로 타는 run_clarify()가 이제 완전히 동일한 11번가 기반 facet
+// 추출을 이미 수행해 그 사전 호출은 매 첫 라운드마다 순수 중복 왕복이었다
+// (checkClarifyFacets/looksAmbiguous 둘 다 제거, decideStream 하나로 통합).
+// 지금은 SearchResults.tsx의 AI 상세검색 카드에서 자유 텍스트 입력 시 facet을
+// 실시간 재조회하는 용도로만 남아있다.
 //
 // sessionPreferences/token(2026-08-15, 사용자 페르소나 기반 상품 매핑) - 이번
 // 세션에서 지금까지 고른 facet 값({라벨: 값})을 실어 보내면, 로그인 계정의
@@ -179,7 +163,6 @@ export function looksAmbiguous(query: string): boolean {
 // 한다). token이 없으면 세션 값만 반영되고 계정 조회는 건너뛴다.
 export async function checkClarifyFacets(
   query: string,
-  baseQuery?: string,
   sessionPreferences?: Record<string, string>,
   token?: string | null
 ): Promise<ClarifyResponse> {
@@ -191,7 +174,6 @@ export async function checkClarifyFacets(
     },
     body: JSON.stringify({
       query,
-      ...(baseQuery ? { base_query: baseQuery } : {}),
       ...(sessionPreferences && Object.keys(sessionPreferences).length > 0
         ? { session_preferences: sessionPreferences }
         : {}),
@@ -246,21 +228,34 @@ export type DecideStreamEvent =
   | { type: 'error'; message: string };
 
 /** /decide와 같은 일을 하지만, 서버가 단계별로 흘려보내는 NDJSON(줄바꿈으로 구분된 JSON)을
- * 그때그때 onEvent로 넘겨준다 — 세 에이전트를 다 기다리지 않고 먼저 끝난 제안부터 보여줄 수 있다. */
+ * 그때그때 onEvent로 넘겨준다 — 세 에이전트를 다 기다리지 않고 먼저 끝난 제안부터 보여줄 수 있다.
+ *
+ * sessionPreferences/token(2026-08-20) - checkClarifyFacets의 사전 호출을 없애면서
+ * (위 checkClarifyFacets 참고), 페르소나 기반 facet 순서 반영이 유지되려면 이
+ * 호출이 직접 실어 보내야 한다 - 백엔드 /decide/stream이 로그인 계정 선호도와
+ * 병합해 내부 clarify 안전망(run_clarify)에 반영한다. */
 export async function decideStream(
   query: string,
   onEvent: (event: DecideStreamEvent) => void,
   brand?: string,
   signal?: AbortSignal,
-  skipIntentCheck?: boolean
+  skipIntentCheck?: boolean,
+  sessionPreferences?: Record<string, string>,
+  token?: string | null
 ): Promise<void> {
   const response = await fetch(`${API_URL}/decide/stream`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
     body: JSON.stringify({
       query,
       ...(brand ? { brand } : {}),
       ...(skipIntentCheck ? { skip_intent_check: true } : {}),
+      ...(sessionPreferences && Object.keys(sessionPreferences).length > 0
+        ? { session_preferences: sessionPreferences }
+        : {}),
     }),
     signal,
   });

@@ -11,16 +11,22 @@ alpha-pick-jet.vercel.app
 
 ### 프로젝트 개요도
 
-> 2026-08 통합 병합 이후 구조. 프론트는 GPT가 실시간으로 응답을 생성하는 대화형 멀티턴
-> UI(`ChatTurn`)로, 백엔드는 ADK 기반 멀티에이전트 오케스트레이션과 다나와 실측 가격
-> 연동을 함께 갖췄다. Human-in-the-loop 백엔드 추출 로직은 facet 기반 파이프라인
-> 하나로 통합돼 있다(`/decide/clarify`·ADK 내부 안전망 공유). 그라운딩은 다나와
-> 실측가 + 쿠팡 교차 확인 신호로 이중화돼 있다. 자세한 배경은
+> 2026-08-20 다나와→11번가 전환 이후 구조. 메인 결정 파이프라인(`/decide/stream`)과
+> AI 상세검색(`/decide/clarify`) 둘 다 다나와 직접 스크래핑을 배제하고 11번가 공식
+> 오픈API로 검색한다 — 메인 파이프라인은 그라운딩이 성공하면 제안(DeepSeek)·교차
+> 검증(DeepSeek)·심사(Groq)·쿠팡/네이버 교차확인까지 전부 조건부로 건너뛰어 "행복
+> 경로"는 LLM 호출이 사실상 0번이다. `/decide/clarify`는 처음엔 이 전환 범위 밖이라
+> 남아있었는데(다나와 Crawl-delay 10초 때문에 체감 지연의 주 원인이었다), 뒤늦게
+> 함께 11번가로 옮겼다 — 동시에 프론트가 첫 라운드마다 이 엔드포인트를 미리 불러보던
+> 사전 호출도 없앴다(`/decide/stream` 내부의 `run_clarify()` 안전망이 이미 완전히
+> 동일한 11번가 기반 facet 추출을 수행해 순수 중복 호출이었다). 다나와 코드는
+> `/decide/danawa-only`(LLM 미사용 실험 경로)와 핸드폰 기종처럼 표본이 특정 생태계로
+> 쏠릴 때의 보충 검색(`_ecosystem_name_pool`)에만 남아있다. 자세한 배경은
 > [주요 의사결정 사항](#주요-의사결정-사항) 참고.
 
 ```mermaid
 flowchart LR
-    subgraph FE["Frontend · GitHub Pages"]
+    subgraph FE["Frontend · GitHub Pages · Vercel"]
         GCI["GradientChatInput<br/>(대화형 입력, 사운드/애니메이션)"]
         CTX["SearchContext.runTurn<br/>(턴 · 히스토리 · baseQuery 관리)"]
         SB["사이드바<br/>(기록 · 로그인)"]
@@ -38,29 +44,27 @@ flowchart LR
     end
 
     subgraph PIPE["AI 오케스트레이션 · Google ADK (adk_pipeline)"]
-        REFINE["질의 정제<br/>(Groq)"]
-        SEARCH["검색<br/>(Tavily + 검색 캐시)"]
-        CAT["카테고리 분류<br/>(Groq, 16종)"]
-        subgraph PROPOSE["제안 · 병렬 실행 (모델별 최선 1개)"]
-            GPT["Qwen"]
-            GEMINI["Groq"]
-            DEEPSEEK["DeepSeek"]
-            DANAWAP["다나와 실측가<br/>(A등급 최저가)"]
-            COUPANGP["쿠팡 교차확인<br/>(후보 아님 · 참고 신호만)"]
+        REFINE["질의 정제<br/>(Groq · 대화체/인사말 질의만 조건부)"]
+        SEARCH["11번가 검색<br/>(오픈API · 구조화 가격/재고)"]
+        ELEVENST["11번가 그라운딩<br/>(구조화 후보 확정 시도)"]
+        subgraph PROPOSE["제안 · elevenst 그라운딩 실패시만 조건부 실행"]
+            DEEPSEEK["DeepSeek 폴백<br/>(의미 매칭)"]
+            SOFT["쿠팡 · 네이버 교차확인<br/>(후보 아님 · 참고 신호만)"]
         end
         MERGE["병합 · 중복 제거<br/>(최저가 매물 기준 통합)"]
-        CHALLENGE["교차 검증<br/>(DeepSeek)"]
-        JUDGE["최종 심사<br/>(Groq)"]
+        CHALLENGE["교차 검증<br/>(DeepSeek · 후보 전부 구조화 출처면 스킵)"]
+        JUDGE["최종 심사<br/>(Groq · 후보 1개면 스킵)"]
     end
 
-    subgraph DANAWA["다나와 실측 가격 연동"]
+    subgraph DANAWA["다나와 실측 가격 연동 · /decide/danawa-only 전용<br/>(+ 핸드폰 기종 등 생태계 쏠림 보충 검색)"]
         DSEARCH["다나와 직접 검색<br/>(search.danawa.com)"]
         PTABLE["가격표 페치 · A등급 판정<br/>(price_table.py)"]
         BRIDGE["최저가 브릿지 URL 해석<br/>(내부 AJAX 엔드포인트)"]
     end
 
     subgraph EXT["외부 서비스"]
-        TAVILY["Tavily 검색 API<br/>(다나와 한정)"]
+        ELEVENSTAPI["11번가 오픈API<br/>(ProductSearch)"]
+        TAVILY["Tavily<br/>(11번가 0건 폴백 · 쿠팡/네이버 신호 전용)"]
         VISION["Google Vision OCR"]
         OAUTH["Google · Kakao · Naver"]
     end
@@ -76,18 +80,17 @@ flowchart LR
     SB --> AUTH
     SB --> HIST
 
-    DECIDE --> REFINE --> SEARCH --> CAT
-    SEARCH --> TAVILY
-    CAT -- "축 관련성 판정<br/>(용량/개수는 카테고리별로 다름)" --> SEARCH
+    DECIDE --> REFINE --> SEARCH
+    SEARCH --> ELEVENSTAPI
     SEARCH -- "브랜드/제품/용량/개수 모호<br/>(skip_clarify 없으면)" --> DECIDE
-    SEARCH --> PROPOSE
-    GPT & GEMINI & DEEPSEEK & DANAWAP --> MERGE --> CHALLENGE --> JUDGE
-    COUPANGP -.->|참고 신호| CHALLENGE
+    SEARCH --> ELEVENST --> PROPOSE
+    PROPOSE -.->|참고 신호| TAVILY
+    PROPOSE --> MERGE --> CHALLENGE --> JUDGE
     JUDGE -- 최종 추천 --> DECIDE
 
-    CLARIFYF --> DSEARCH --> DANAWA
+    CLARIFYF --> ELEVENSTAPI
+    DANAWAONLY --> DSEARCH --> DANAWA
     DANAWAONLY --> PTABLE
-    JUDGE -.-> BRIDGE
     DECIDE -.-> BRIDGE
 
     OCR --> VISION
@@ -103,10 +106,10 @@ flowchart LR
 | Frontend | React 18, Vite 6, TypeScript, Tailwind CSS v4, Framer Motion(`motion`), React Router (HashRouter) |
 | Backend | FastAPI, Python, httpx, PyJWT |
 | 멀티에이전트 오케스트레이션 | Google ADK(`SequentialAgent`/`ParallelAgent`), LiteLLM |
-| AI / 제안 · 검증 · 심사 | Qwen(DashScope) · Groq(GPT-OSS) · DeepSeek — 병렬 제안(모델별 최선 1개) / DeepSeek — 교차 검증(challenge) / Groq(GPT-OSS) — 최종 심사(judge) |
-| 검색 | Tavily Search API (다나와로 도메인 한정) + 정규화 질의 기반 검색 캐시 |
-| 다나와 실측 가격 연동 | 다나와 직접 검색/상세페이지 페치(`httpx` + `BeautifulSoup4`/`lxml`), 내부 AJAX 엔드포인트를 통한 최저가 판매처 브릿지 URL 해석 |
-| Human-in-the-loop | DeepSeek가 상품명 목록에서 facet(라벨 자유, 상호 교차 필터링)을 추출 — `/decide/clarify`(다나와 직접 검색)와 ADK 파이프라인 내부 안전망(Tavily 결과) 두 진입점이 하나의 공유 추출 파이프라인을 씀. 되묻는 질문 문장은 Qwen이 실시간 생성(`/clarify/ask`) |
+| AI / 제안 · 검증 · 심사 | 11번가 구조화 후보(그라운딩 성공 시 확정, LLM 미사용) + DeepSeek(그라운딩 실패시만 조건부 폴백 제안) / DeepSeek — 교차 검증(challenge, 후보가 전부 구조화 출처면 건너뜀) / Groq(gpt-oss-120b) — 최종 심사(judge, 후보가 1개면 건너뜀) |
+| 검색 | 11번가 오픈API(ProductSearch, 구조화 가격/재고) + 정규화 질의 기반 검색 캐시 — 메인 파이프라인(`/decide/stream`)·AI 상세검색(`/decide/clarify`) 모두 이걸 쓴다. 0건일 때만 Tavily 비제한 검색으로 상품명을 발견해 재검색(최후 폴백), 쿠팡/네이버 교차확인 신호도 Tavily |
+| 다나와 실측 가격 연동 | `/decide/danawa-only`(LLM 미사용 실험 경로) 전용 + AI 상세검색의 핸드폰 기종처럼 특정 생태계로 표본이 쏠릴 때의 보충 검색(`_ecosystem_name_pool`) — 다나와 직접 검색/상세페이지 페치(`httpx` + `BeautifulSoup4`/`lxml`), 내부 AJAX 엔드포인트를 통한 최저가 판매처 브릿지 URL 해석. 메인 결정 파이프라인·AI 상세검색의 주 검색 경로는 둘 다 11번가로 대체돼 더 이상 다나와를 안 씀(`_DanawaFetchNode`는 참고용으로 코드에만 남음) |
+| Human-in-the-loop | DeepSeek가 상품명 목록에서 facet(라벨 자유, 상호 교차 필터링)을 추출 — `/decide/clarify`와 ADK 파이프라인 내부 안전망(`run_clarify`) 두 진입점이 하나의 공유 추출 파이프라인을 쓰고, 둘 다 11번가 검색 결과를 입력으로 받는다. 사용자 페르소나(로그인 선호도 + 세션 선택)도 두 진입점에 동일하게 반영된다. 되묻는 질문 문장은 Qwen이 실시간 생성(`/clarify/ask`) |
 | 이미지 인식 | Google Cloud Vision (텍스트 추출) → Groq (정제 · 검색어 추출) |
 | 인증 | Google / Kakao / Naver OAuth2 + JWT 기반 세션 |
 | 저장소 | SQLite (검색 기록 · 자동완성 인덱스 · 검색 캐시) |
@@ -151,6 +154,7 @@ flowchart LR
 | 2026-08-17 | 다나와 가격비교 페이지 필터를 도메인 기반으로 일반화(모바일 URL 변형 누락 대응) · 그라운딩 회귀 스크립트에 실행 전 제공자 헬스체크 + 도중 연속 실패 시 즉시 중단 안전장치 추가 · README에 그라운딩 회귀 실험 이력을 표+그래프로 자동 갱신하는 기능 추가 · 배포 저장소를 Prototype-1- 하나로 일원화(구 Alpha-pick00.github.io가 비공개/개명되며 배포 대상에서 제외, Pages 활성화 + 누락 환경변수 설정 + 죽은 배포 터널 재기동) · 안전장치의 쿼터 소진 감지가 파이프라인 내부 예외 삼킴에 뚫리는 문제 발견 후 문자열 매칭 → 연속 실패 기반 헬스체크 재확인 방식으로 재설계 |
 | 2026-08-18 | 배포 터널 재소진 + 구 GitHub Pages URL 404 확인 후 터널 재기동·`VITE_API_URL` 갱신·재배포로 복구 · "gemini" 슬롯 기본 Groq 모델을 llama-3.3-70b-versatile → gpt-oss-20b로 교체 · 프론트엔드를 Vercel에도 배포하고 백엔드를 기존 AWS 인스턴스에 최신 코드로 재배포(저장소 재동기화, nginx+TLS를 새 인스턴스 IP로 재발급), CORS에 Vercel 도메인 추가 |
 | 2026-08-19 | 취향 주도 카테고리(패션의류/잡화 등)에 스타일 가이드 응답 모드 추가(검증된 후보를 스타일별로 그룹핑) · 토큰 사용량 최적화(clarify facet 추출 가드, classify_category 모델 재배정) · 저장소 전반 죽은 코드/미사용 설정·의존성 정리(백엔드·프론트엔드) · README 정리 |
+| 2026-08-20 | **메인 결정 파이프라인의 검색 백엔드를 Tavily+다나와 도메인 한정 → 11번가 오픈API로 전면 교체**(다나와 AWS IP 403 차단/Crawl-delay 불안정성 회피) · 제안 LLM을 Qwen/Groq/DeepSeek 3개 병렬 → 11번가 그라운딩 실패시만 조건부 호출되는 DeepSeek 1개로 축소, 그라운딩 성공 시 challenge/judge/쿠팡·네이버 교차확인까지 연쇄로 스킵(행복 경로 LLM 호출 0번) · 질의 정제(refine)를 대화체/인사말 질의(`looks_conversational_query`)에만 조건부로 재도입 · AI 상세검색 "카테고리" 되묻기를 프롬프트+코드 이중으로 제거 · AI 상세검색 facet 전체 선택 시 자동 제출, 드릴다운 질의 표시 정리, 대화체 질의 정제(`groq.refine_query`) 추가 · **뒤이어 AI 상세검색(`check_clarify_facets`)도 11번가로 마저 전환**(다나와 Crawl-delay가 여전히 남아있던 체감 지연의 주 원인이었음), 프론트가 첫 라운드마다 미리 불러보던 `/decide/clarify` 사전 호출을 제거(`/decide/stream` 내부 `run_clarify()`가 이미 동일한 11번가 기반 판정을 수행해 중복이었음), 사용자 페르소나(facet 순서 반영)를 `/decide/stream` 경로까지 관통시켜 사전 호출 제거로 인한 기능 손실 방지 |
 
 ### 주요 의사결정 사항
 
@@ -184,6 +188,11 @@ flowchart LR
 - **프론트엔드를 Vercel에도 배포하고 백엔드를 AWS 인스턴스로 이전**: 기존 Cloudflare Quick Tunnel을 벗어나 AWS EC2 인스턴스로 백엔드 이전(`backend/deploy/DEPLOY.md` 참고), nginx/TLS를 새 IP로 재발급. 프론트는 GitHub Pages를 유지한 채 Vercel에 추가 배포, CORS에 Vercel 도메인 추가
 - **토큰 사용량 최적화**: `_extract_clarify_options`가 후속 질의 라운드에도 무거운 facet 추출(브랜드별 최대 15개 병렬 DeepSeek 호출)을 무조건 실행하던 것을 가드 처리, 브랜드별 팬아웃도 6개로 제한. `classify_category`를 부하가 몰린 `gpt-oss-120b`에서 여유 있는 `gpt-oss-20b`로 재배정
 - **저장소 정리**: 호출부가 없는 함수/클래스, 옛 프로토타입 디렉터리, 대체된 Google Merchant/임베딩 기반 검색 캐시 모듈과 그 설정·의존성을 제거. 프론트의 미사용 멀티 대화 전환 상태, 중복 CSS 파일, 빈 PostCSS 설정 제거
+- **메인 파이프라인 검색 데이터 소스를 11번가 오픈API로 전면 교체**: 다나와 직접 스크래핑(`search.danawa.com`)이 AWS 데이터센터 IP 대역을 403으로 차단하고 robots.txt Crawl-delay(10초)까지 겹쳐 런타임 경로로 쓰기 불안정해, 공식 발급받은 11번가 ProductSearch API로 검색·그라운딩을 이전(`fetchers/elevenst.py`, `_ElevenstFetchNode`). `_DanawaFetchNode`/`fetchers/danawa*.py`는 참고·롤백용으로 코드에 남지만 메인 파이프라인(`propose_parallel`)에서는 더 이상 호출되지 않는다. **AI 상세검색(`/decide/clarify` → `check_clarify_facets`)은 이 전환 범위 밖이라 지금도 다나와를 직접 스크래핑한다** — 두 경로의 검색 백엔드가 서로 다르다는 점에 유의(아래 [한계점 및 향후 과제](#한계점-및-향후-과제) 참고)
+- **제안 LLM 3개(Qwen/Groq/DeepSeek 병렬) → 조건부 DeepSeek 1개로 축소**: 검색이 11번가 구조화 데이터 하나뿐이 되면서, 세 LLM이 같은 목록을 다시 텍스트로 추측해 읽는 게 완전한 중복이었다(사용자 판단: "나는 3개의 LLM까지 필요없다"). Qwen/Groq 슬롯을 propose에서 빼고, DeepSeek는 11번가 그라운딩(`_product_name_matches` 이름 매칭)이 실패했을 때만(오타·비속어·다르게 부르는 브랜드명 등 rapidfuzz가 못 잡는 경우) 의미적 매칭 안전망으로 조건부 호출한다. 그라운딩 성공 시 challenge(DeepSeek)·judge(Groq)·쿠팡/네이버 교차확인(Tavily)까지 전부 `before_model_callback`으로 연쇄 스킵돼, 대부분의 검색은 LLM 호출이 0번이다
+- **질의 정제(refine)를 조건부로 재도입**: 한 번 완전히 제거했다가("쿼리 재질의 없애고") "안녕 나 컵을 사고싶어"처럼 인사말/대화체로 감싼 질의가 정제 없이 그대로 11번가 keyword 검색에 들어가 검색·그라운딩이 둘 다 실패하는 회귀가 드러나(`_skip_refine_unless_conversational`) 재도입. 예전처럼 애매한 질의 전체가 아니라 `looks_conversational_query()`로 좁혀, 이미 짧고 깨끗한 검색어("음료수" 등)는 계속 LLM 호출 없이 건너뛴다
+- **AI 상세검색 "카테고리" 되묻기 완전 제거**: "이프로"·"초코파이"처럼 검색어 자체로 카테고리가 명백한데도 "카테고리에서 음료를 고르세요"라고 불필요하게 되묻던 문제 — DeepSeek 프롬프트에서 "카테고리" 라벨 예시를 제거하고, 프롬프트 지시와 무관하게 모델이 스스로 만들어내는 경우까지 대비해 코드 레벨에서도 `label=="카테고리"` facet을 한 번 더 필터링(이중 방어)
+- **AI 상세검색(`check_clarify_facets`)도 뒤이어 11번가로 전환, 사전 호출 자체를 제거**: 메인 파이프라인만 11번가로 옮기고 이 함수는 그대로 둔 채로 한 세션이 끝나, 사용자가 "다나와 기능에 있던 걸 다 옮겼어야지 왜 안 옮겼냐"고 지적 — 다시 보니 `/decide/stream`이 내부적으로 타는 `run_clarify()`가 이미 완전히 동일한 11번가 기반 facet 추출을 수행하고 있어서, 프론트가 첫 라운드마다 `/decide/clarify`를 미리 불러보던 사전 체크(`SearchContext.tsx::runTurn`)는 순수 중복 왕복이었다. 그 사전 호출을 없애고 `/decide/stream` 하나로 합쳤다 — `check_clarify_facets` 자체는 다나와→11번가로 검색만 갈아끼운 채 남겨서, AI 상세검색 카드의 자유 텍스트 입력 시 facet 실시간 재조회(`SearchResults.tsx`, `/decide/stream`으로는 대체할 수 없는 용도)에 계속 쓴다. base_query 캐시 재사용·카테고리 표본 좁히기 최적화는 다나와 Crawl-delay 회피가 목적이었어서 11번가에선 무의미해져 함께 제거했다. 사전 호출에만 있던 사용자 페르소나(로그인 선호도 + 세션 선택 기반 facet 순서 반영)가 조용히 없어지지 않도록, `main.py::_compute_persona`를 `/decide`·`/decide/stream`에도 적용하고 `persona` 파라미터를 `adk_pipeline.run`/`run_stream`의 내부 clarify 안전망까지 관통시켰다
 
 ### 문제 해결 내역 (Troubleshooting)
 
@@ -217,8 +226,8 @@ flowchart LR
 
 ### 데이터 소스 및 탐색
 
-- **검색 데이터**: Tavily Search API를 통해 실시간으로 조회, 다나와 도메인으로 한정(원래 국내 리테일러 15곳이었으나, 사이트마다 페이지 구조가 달라 스니펫만으로 파싱하면 엉뚱한 상품이 섞이는 문제로 가격비교 사이트 하나로 축소)
-- **다나와 실측 데이터**: 다나와 검색결과/상세페이지를 직접 페치해 판매처별 가격 · 배송정보 · 구매 링크 가능 여부(A/B등급)를 파싱, 내부 AJAX 엔드포인트로 최저가 판매처의 실제 구매 URL까지 확보
+- **검색 데이터**: 11번가 오픈API(ProductSearch)를 통해 실시간으로 구조화 조회(가격 · 재고 · 판매자 · 상세 URL을 그대로 받음) — 메인 파이프라인(`/decide/stream`)과 AI 상세검색(`/decide/clarify`) 모두 동일하다. 원래는 Tavily Search API로 국내 리테일러 15곳 → 다나와 도메인 단독으로 좁혀 스니펫을 파싱했으나(사이트마다 페이지 구조가 달라 엉뚱한 상품이 섞이는 문제), 다나와 자체 스크래핑도 AWS IP 차단/Crawl-delay로 불안정해 2026-08-20에 공식 API로 교체했다(메인 파이프라인이 먼저, AI 상세검색은 뒤이어). 0건일 때만 Tavily 비제한 검색으로 최후 폴백
+- **다나와 실측 데이터**: `/decide/danawa-only`(LLM 미사용 실험 경로)와 핸드폰 기종 등 생태계 쏠림 보충 검색에서만 다나와 검색결과/상세페이지를 직접 페치해 판매처별 가격 · 배송정보 · 구매 링크 가능 여부(A/B등급)를 파싱, 내부 AJAX 엔드포인트로 최저가 판매처의 실제 구매 URL까지 확보
 - **이미지 데이터**: 사용자가 업로드한 상품 사진 → Google Cloud Vision으로 텍스트 추출
 
 ### 전처리(검색 결과 정제) 방법
@@ -246,20 +255,19 @@ sequenceDiagram
     participant CTX as SearchContext.runTurn
     participant B as 백엔드(ADK 파이프라인)
     participant Cache as 검색 캐시
-    participant T as Tavily
-    participant P as 제안 에이전트(Qwen·Groq·DeepSeek·다나와실측)
-    participant CP as 쿠팡(교차확인 · 참고신호)
-    participant D as DeepSeek(교차 검증)
-    participant J as Groq(심사)
-    participant DW as 다나와(브릿지 URL 해석)
+    participant E as 11번가 오픈API
+    participant P as DeepSeek(제안 · 그라운딩 실패시만 조건부)
+    participant CP as 쿠팡·네이버(교차확인 · 참고신호 · 조건부)
+    participant D as DeepSeek(교차 검증 · 조건부)
+    participant J as Groq(심사 · 조건부)
 
     U->>CTX: 검색어 입력(첫 턴)
     CTX->>B: POST /decide/stream (skip_intent_check=false)
-    B->>B: 질의 정제(Groq)
+    B->>B: 질의 정제(Groq, 대화체/인사말 질의일 때만)
     B->>Cache: 캐시 조회
     alt 캐시 미스
-        B->>T: 다나와 한정 검색
-        T-->>B: 검색 결과
+        B->>E: 11번가 검색
+        E-->>B: 구조화 상품 목록(가격 · 재고)
         B->>Cache: 결과 저장
     end
     alt 브랜드/제품/용량/개수 모호 (Human-in-the-loop)
@@ -267,24 +275,27 @@ sequenceDiagram
         CTX-->>U: 새 턴으로 이어붙여 되묻기(버튼 · 채팅 둘 다)
         U->>CTX: 옵션 선택 또는 채팅 답변(Qwen이 매칭)
         CTX->>B: 후속 턴 POST /decide/stream (skip_intent_check=true)
-        Note over B: skip_clarify=true → 내부 애매함 판정을 건너뛰고<br/>바로 제안 단계로 진행(재질문 방지)
+        Note over B: skip_clarify=true → 내부 애매함 판정을 건너뛰고<br/>바로 그라운딩 단계로 진행(재질문 방지)
     end
-    B->>P: 검색 결과 + 질의 전달 (병렬, 모델별 최선 1개)
-    P-->>B: 상품 후보 제안 (근거 포함, 다나와는 실측가)
-    B->>CP: 병렬로 쿠팡 한정 검색(후보 아님)
-    CP-->>B: 참고용 검색 결과
+    B->>B: 11번가 결과로 그라운딩(이름 매칭 + 최저가 1건)
+    alt 그라운딩 성공
+        Note over B,J: DeepSeek 제안 · 쿠팡/네이버 교차확인 · challenge ·<br/>judge 전부 스킵 — LLM 호출 0번으로 완료
+    else 그라운딩 실패(오타 · 비속어 · 다르게 부르는 브랜드명 등)
+        B->>P: 검색 결과 + 질의 전달
+        P-->>B: 의미 매칭 상품 후보 제안
+        B->>CP: 병렬로 쿠팡 · 네이버 한정 검색(후보 아님)
+        CP-->>B: 참고용 검색 결과
+        B->>D: 후보 + 참고 결과로 교차 검증 요청
+        D-->>B: 검증 결과(verified 여부 · note)
+    end
     B->>B: 후보 병합 · 중복 제거(최저가 매물 기준)
-    B->>D: 병합된 후보 + 쿠팡 참고 결과로 교차 검증 요청
-    D-->>B: 검증 결과(verified 여부 · note)
-    B->>J: 검증된 후보 심사 요청
+    B->>J: 검증된 후보가 2개 이상일 때만 심사 요청(1개면 그대로 채택)
     J-->>B: 최종 추천 + 선정 근거
-    B->>DW: 최종 URL이 다나와 페이지면 최저가 브릿지 URL 조회
-    DW-->>B: 실제 구매 가능 URL
     B-->>CTX: 상품명 · 가격 · 판매처 · 근거 (스트리밍)
     CTX-->>U: 대화 스레드에 결과 카드 표시
 ```
 
-짧고 애매한 검색어(예: "핸드폰")는 위 흐름 전에 `POST /decide/clarify`(다나와 검색 결과 기반 동적 facet, DeepSeek)를 먼저 시도하고, facet을 못 찾으면 그대로 `/decide/stream` 경로로 넘어간다.
+짧고 애매한 검색어(예: "핸드폰")에 대한 facet 되묻기는 위 시퀀스 안에 이미 들어있다 - `/decide/stream`이 11번가 검색 직후 내부적으로 타는 `run_clarify()`가 그 역할을 한다. (2026-08-20) 원래는 프론트가 이 시퀀스 전에 `POST /decide/clarify`를 먼저 불러 같은 판정을 미리 해봤는데, `run_clarify()`가 완전히 동일한 11번가 기반 facet 추출을 이미 수행해 그 사전 호출은 순수 중복 왕복이었다 - 제거했다. `/decide/clarify`는 지금도 존재하지만 AI 상세검색 카드에서 사용자가 자유 텍스트를 입력했을 때 facet을 실시간 재조회하는 용도로만 쓰인다. 최저가 브릿지 URL 해석(다나와 내부 AJAX 엔드포인트)은 `/decide/danawa-only`에서만 쓰이고, 메인 파이프라인·AI 상세검색 둘 다 더 이상 다나와 후보를 만들지 않아 사실상 거치지 않는다.
 
 ### 트러블슈팅
 
@@ -343,10 +354,11 @@ xychart-beta
 
 - 카카오 로그인은 REST API 키 설정을 완료했으나, 실사용 트래픽 기준의 검증은 아직 진행 전
 - 정성적 검증 위주로 진행되어, 정량적 지표(응답 정확도·지연 시간 등) 기반의 자동화된 평가 체계는 부재
-- 현재는 다나와 하나로 한정된 검색 범위를 점진적으로 확장할 여지가 있음
+- 현재는 11번가 하나로 한정된 검색 범위를 점진적으로 확장할 여지가 있음(원래 다나와 하나였던 것과 같은 구조적 한계 - 소스만 바뀜)
 - Google ADK가 출시 초기 버전(`SequentialAgent`/`ParallelAgent`가 이미 deprecated 표시)이라, 향후 문서가 더 풍부한 `Workflow`/`@node` API로의 이전을 검토할 필요가 있음
 - Human-in-the-loop을 앱 레벨의 무상태 재실행(파이프라인을 처음부터 다시 실행)으로 구현해 단계마다 정제/검색 비용이 다시 발생함 — ADK 세션 기반의 내부 pause/resume으로 전환하면 절감 가능
 - clarify의 백엔드 추출 로직은 facet(DeepSeek) 하나로 통합했지만(아래 의사결정 참고), 프론트엔드의 `FixedAxisClarifyCard`(자연어 질문 생성용 `/clarify/ask`)와 브랜드 전용 버튼 블록은 아직 별도 UI로 남아있음 — 완전한 UI 수준 수렴은 후속 과제
+- 핸드폰 기종처럼 특정 생태계(갤럭시/아이폰)로 표본이 쏠릴 때의 보충 검색(`_ecosystem_name_pool`)은 메인 검색이 11번가로 전환된 뒤에도 여전히 다나와 직접 검색을 쓴다 - 흔치 않은 보정 경로라 우선순위가 낮았을 뿐, 완전한 다나와 배제를 원하면 남은 과제
 
 ### 회고
 
