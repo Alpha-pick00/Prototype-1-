@@ -7,29 +7,31 @@ alpha-pick-jet.vercel.app
 
 ### 프로젝트명 및 한 줄 소개
 
-**αlpha Pick** — 하나의 검색어를 여러 AI 에이전트가 각자 조사해 제안하고, 별도의 심사 에이전트가 근거를 비교해 하나의 답으로 압축해주는 멀티에이전트 쇼핑 가격비교 서비스.
+**αlpha Pick** — 검색어를 11번가 오픈 API의 실측 구조화 데이터로 검증하고, AI 추천 Agent가 가격·리뷰·구매만족도를 종합해 근거와 함께 하나의 답으로 압축해주는 쇼핑 가격비교 서비스.
 
 ### 프로젝트 개요도
 
-> 2026-08 통합 병합 이후 구조. 프론트는 GPT가 실시간으로 응답을 생성하는 대화형 멀티턴
-> UI(`ChatTurn`)로, 백엔드는 ADK 기반 멀티에이전트 오케스트레이션과 다나와 실측 가격
-> 연동을 함께 갖췄다. Human-in-the-loop 백엔드 추출 로직은 facet 기반 파이프라인
-> 하나로 통합돼 있다(`/decide/clarify`·ADK 내부 안전망 공유). 그라운딩은 다나와
-> 실측가 + 쿠팡 교차 확인 신호로 이중화돼 있다. 자세한 배경은
+> 2026-08-20 재설계 이후 구조. 다나와 스크래핑 + Tavily 검색 + Google ADK 멀티에이전트
+> 디베이트(정제 → 검색 → 3모델 병렬 제안 → 교차검증 → 심사) 파이프라인 전체를 걷어내고,
+> 11번가 오픈 API(ProductSearch, 1st-party 구조화 데이터) 하나로 통일했다. 검색 →
+> 관련성 검증(`_product_name_matches`) → 검증된 후보군만 → 추천 Agent(Qwen 임베딩 관련도
+> 랭킹 + LLM 최종 선택) → 최종 추천의 단순한 선형 파이프라인이다. Human-in-the-loop은
+> 텍스트 재검색 대신 구조적 로컬 필터링으로 후보군을 좁혀나가고(카테고리 축은 11번가가
+> 카테고리 필터 자체를 지원하지 않아 되묻지 않음), 검색어 표기가 카탈로그와 다를 때만
+> (예: "2프로"↔"이프로") Groq이 대안 표기를 제안해 재검색한다. 자세한 배경은
 > [주요 의사결정 사항](#주요-의사결정-사항) 참고.
 
 ```mermaid
 flowchart LR
-    subgraph FE["Frontend · GitHub Pages"]
+    subgraph FE["Frontend · Vercel / GitHub Pages"]
         GCI["GradientChatInput<br/>(대화형 입력, 사운드/애니메이션)"]
         CTX["SearchContext.runTurn<br/>(턴 · 히스토리 · baseQuery 관리)"]
         SB["사이드바<br/>(기록 · 로그인)"]
     end
 
     subgraph BE["Backend · FastAPI (AWS)"]
-        DECIDE["POST /decide/stream<br/>(AI 오케스트레이션)"]
+        DECIDE["POST /decide/stream<br/>(메인 검색 흐름)"]
         CLARIFYF["POST /decide/clarify<br/>(AI 상세검색 · facet)"]
-        DANAWAONLY["POST /decide/danawa-only[/stream]<br/>(LLM 미사용 실험 경로)"]
         CHAT["POST /clarify/ask<br/>(대화형 봇 질문 생성)"]
         OCR["POST /ocr/extract"]
         AUTH["/auth/*"]
@@ -37,30 +39,26 @@ flowchart LR
         AC["/autocomplete"]
     end
 
-    subgraph PIPE["AI 오케스트레이션 · Google ADK (adk_pipeline)"]
-        REFINE["질의 정제<br/>(Groq)"]
-        SEARCH["검색<br/>(Tavily + 검색 캐시)"]
-        CAT["카테고리 분류<br/>(Groq, 16종)"]
-        subgraph PROPOSE["제안 · 병렬 실행 (모델별 최선 1개)"]
-            GPT["Qwen"]
-            GEMINI["Groq"]
-            DEEPSEEK["DeepSeek"]
-            DANAWAP["다나와 실측가<br/>(A등급 최저가)"]
-            COUPANGP["쿠팡 교차확인<br/>(후보 아님 · 참고 신호만)"]
-        end
-        MERGE["병합 · 중복 제거<br/>(최저가 매물 기준 통합)"]
-        CHALLENGE["교차 검증<br/>(DeepSeek)"]
-        JUDGE["최종 심사<br/>(Groq)"]
+    subgraph CORE["run_elevenst_only_debate(app/debate.py)"]
+        SEARCH11["11번가 검색<br/>(base_query 있으면 구조적 필터, 없으면 직접 검색)"]
+        VERIFY["관련성 검증<br/>(_product_name_matches)"]
+        VARIANT["검색 실패 시 표기 변형 재검색<br/>(Groq, '2프로'↔'이프로' 등)"]
+        RANK["관련도 랭킹<br/>(Qwen 임베딩 코사인 유사도)"]
+        RECOMMEND["추천 Agent<br/>(Qwen - 가격·리뷰·구매만족도 종합)"]
     end
 
-    subgraph DANAWA["다나와 실측 가격 연동"]
-        DSEARCH["다나와 직접 검색<br/>(search.danawa.com)"]
-        PTABLE["가격표 페치 · A등급 판정<br/>(price_table.py)"]
-        BRIDGE["최저가 브릿지 URL 해석<br/>(내부 AJAX 엔드포인트)"]
+    subgraph CLARIFY["check_clarify_facets(app/debate.py)"]
+        CFCACHE["정적 facet 캐시<br/>(정규식 매칭)"]
+        CFSEARCH["11번가 검색<br/>(base_query, 90개)"]
+        CFEXTRACT["facet 추출<br/>(DeepSeek + 브랜드/기종별 보강)"]
+        LLMCACHE[("Supabase KV+시맨틱 캐시<br/>(app/llm_cache.py, 선택적)")]
     end
 
     subgraph EXT["외부 서비스"]
-        TAVILY["Tavily 검색 API<br/>(다나와 한정)"]
+        ELEVENST["11번가 오픈 API<br/>(ProductSearch · Categories)"]
+        QWEN["Qwen(DashScope)<br/>임베딩 · 추천 Agent · clarify 질문 생성"]
+        GROQ["Groq<br/>검색어 표기 변형 · OCR 정제"]
+        DEEPSEEKAI["DeepSeek<br/>facet 추출"]
         VISION["Google Vision OCR"]
         OAUTH["Google · Kakao · Naver"]
     end
@@ -70,27 +68,29 @@ flowchart LR
     GCI --> CTX
     CTX --> DECIDE
     CTX --> CLARIFYF
-    CTX -- "LLM 키 없음(로컬 실험)" --> DANAWAONLY
     GCI --> CHAT
     GCI --> OCR
     SB --> AUTH
     SB --> HIST
 
-    DECIDE --> REFINE --> SEARCH --> CAT
-    SEARCH --> TAVILY
-    CAT -- "축 관련성 판정<br/>(용량/개수는 카테고리별로 다름)" --> SEARCH
-    SEARCH -- "브랜드/제품/용량/개수 모호<br/>(skip_clarify 없으면)" --> DECIDE
-    SEARCH --> PROPOSE
-    GPT & GEMINI & DEEPSEEK & DANAWAP --> MERGE --> CHALLENGE --> JUDGE
-    COUPANGP -.->|참고 신호| CHALLENGE
-    JUDGE -- 최종 추천 --> DECIDE
+    DECIDE --> SEARCH11 --> VERIFY
+    VERIFY -- "관련 상품 0건" --> VARIANT --> VERIFY
+    VERIFY -- "검증된 후보군" --> RANK --> RECOMMEND
+    SEARCH11 --> ELEVENST
+    VARIANT --> GROQ
+    RANK --> QWEN
+    RECOMMEND --> QWEN
+    RECOMMEND -- 최종 추천 --> DECIDE
 
-    CLARIFYF --> DSEARCH --> DANAWA
-    DANAWAONLY --> PTABLE
-    JUDGE -.-> BRIDGE
-    DECIDE -.-> BRIDGE
+    CLARIFYF --> CFCACHE
+    CFCACHE -- "캐시 미스" --> CFSEARCH --> ELEVENST
+    CFSEARCH --> CFEXTRACT --> DEEPSEEKAI
+    CFEXTRACT <-.-> LLMCACHE
+    CFEXTRACT -- facets --> CLARIFYF
+    CHAT --> QWEN
 
     OCR --> VISION
+    OCR --> GROQ
     AUTH --> OAUTH
     HIST --> DB
     AC --> DB
@@ -102,24 +102,25 @@ flowchart LR
 | --- | --- |
 | Frontend | React 18, Vite 6, TypeScript, Tailwind CSS v4, Framer Motion(`motion`), React Router (HashRouter) |
 | Backend | FastAPI, Python, httpx, PyJWT |
-| 멀티에이전트 오케스트레이션 | Google ADK(`SequentialAgent`/`ParallelAgent`), LiteLLM |
-| AI / 제안 · 검증 · 심사 | Qwen(DashScope) · Groq(GPT-OSS) · DeepSeek — 병렬 제안(모델별 최선 1개) / DeepSeek — 교차 검증(challenge) / Groq(GPT-OSS) — 최종 심사(judge) |
-| 검색 | Tavily Search API (다나와로 도메인 한정) + 정규화 질의 기반 검색 캐시 |
-| 다나와 실측 가격 연동 | 다나와 직접 검색/상세페이지 페치(`httpx` + `BeautifulSoup4`/`lxml`), 내부 AJAX 엔드포인트를 통한 최저가 판매처 브릿지 URL 해석 |
-| Human-in-the-loop | DeepSeek가 상품명 목록에서 facet(라벨 자유, 상호 교차 필터링)을 추출 — `/decide/clarify`(다나와 직접 검색)와 ADK 파이프라인 내부 안전망(Tavily 결과) 두 진입점이 하나의 공유 추출 파이프라인을 씀. 되묻는 질문 문장은 Qwen이 실시간 생성(`/clarify/ask`) |
+| 검색 | 11번가 오픈 API(ProductSearch · Categories) - 1st-party 구조화 데이터, 스크래핑 없음 |
+| 관련성 검증 | rapidfuzz 토큰 유사도 + 모델/규격 토큰 충돌 가드 + 상호배타 토큰 가드(`_product_name_matches`) - 검색어와 실제로 일치하는 상품만 후보로 인정 |
+| 추천 Agent | Qwen(DashScope) 임베딩(`text-embedding-v3`)으로 후보를 관련도순 정렬 → Qwen이 가격·리뷰·구매만족도를 종합해 최종 추천 선택(실패 시 최저가 규칙 기반 폴백) |
+| 검색어 표기 변형 | Groq(GPT-OSS) - 1차 검색이 관련 상품을 못 찾으면 카탈로그 표기 차이(예: "2프로"↔"이프로"↔"2%")를 추론해 대안 표기로 재검색 |
+| Human-in-the-loop | DeepSeek가 11번가 검색 상품명 목록에서 facet(라벨 자유, 상호 교차 필터링)을 추출. 카테고리 축은 되묻지 않고(11번가가 카테고리 필터 미지원), 드릴다운 후속 턴은 재검색 대신 순수 로컬 필터링으로 후보군을 좁힘. 되묻는 질문 문장은 Qwen이 실시간 생성(`/clarify/ask`) |
+| LLM 응답 캐시 | Supabase(Postgres + pgvector) 기반 KV(완전 일치) + 시맨틱(임베딩 유사도) 2단 캐시 - 선택적, 미설정 시 안전하게 no-op |
 | 이미지 인식 | Google Cloud Vision (텍스트 추출) → Groq (정제 · 검색어 추출) |
 | 인증 | Google / Kakao / Naver OAuth2 + JWT 기반 세션 |
-| 저장소 | SQLite (검색 기록 · 자동완성 인덱스 · 검색 캐시) |
+| 저장소 | SQLite (검색 기록 · 자동완성 인덱스), Supabase(LLM 캐시, 선택적) |
 | 배포 | Docker, nginx, certbot, AWS GPU 인스턴스, nip.io(Backend) / GitHub Pages, Vercel(Frontend), GitHub Actions(CI) |
 
 ### 주제 선정 배경
 
-쇼핑을 위해 여러 플랫폼 탭을 오가며 가격을 직접 비교해야 하는 번거로움에서 출발했다. 단순히 최저가를 나열하는 비교 서비스가 아니라, "왜 이 상품인지" 근거를 함께 제시하는 서비스를 목표로 했고, 하나의 LLM에만 의존할 경우 생기는 편향·환각 문제를 줄이기 위해 **여러 모델이 각자 조사해 제안하고, 별도 모델이 심사하는 멀티에이전트 구조**를 채택했다.
+쇼핑을 위해 여러 플랫폼 탭을 오가며 가격을 직접 비교해야 하는 번거로움에서 출발했다. 단순히 최저가를 나열하는 비교 서비스가 아니라, "왜 이 상품인지" 근거를 함께 제시하는 서비스를 목표로 했고, LLM이 상품 정보 자체를 지어낼 위험(환각)을 줄이기 위해 **실측 구조화 데이터로 검증된 후보만 LLM에게 보여주고 그중에서 고르게 하는 구조**를 채택했다(초기엔 3개 제안 모델 + 1개 심사 모델의 멀티에이전트 디베이트 구조였으나, 2026-08-20 재설계로 지금의 형태로 단순화됐다 - [주요 의사결정 사항](#주요-의사결정-사항) 참고).
 
 ### 목표 및 기대효과
 
 - 여러 쇼핑몰을 직접 비교하는 시간을 줄이고, 근거가 붙은 단일 추천으로 의사결정을 단순화
-- 단일 모델 호출 대비, 여러 모델의 교차 검증을 통해 추천의 신뢰도를 높임
+- LLM이 상품 정보를 지어내지 않도록, 실측 구조화 데이터로 검증된 후보만 추천 대상으로 삼아 신뢰도를 높임
 - 텍스트뿐 아니라 상품 사진(OCR)으로도 검색이 가능해 입력 장벽을 낮춤
 
 ### 팀원 구성 및 역할 분담
@@ -151,6 +152,7 @@ flowchart LR
 | 2026-08-17 | 다나와 가격비교 페이지 필터를 도메인 기반으로 일반화(모바일 URL 변형 누락 대응) · 그라운딩 회귀 스크립트에 실행 전 제공자 헬스체크 + 도중 연속 실패 시 즉시 중단 안전장치 추가 · README에 그라운딩 회귀 실험 이력을 표+그래프로 자동 갱신하는 기능 추가 · 배포 저장소를 Prototype-1- 하나로 일원화(구 Alpha-pick00.github.io가 비공개/개명되며 배포 대상에서 제외, Pages 활성화 + 누락 환경변수 설정 + 죽은 배포 터널 재기동) · 안전장치의 쿼터 소진 감지가 파이프라인 내부 예외 삼킴에 뚫리는 문제 발견 후 문자열 매칭 → 연속 실패 기반 헬스체크 재확인 방식으로 재설계 |
 | 2026-08-18 | 배포 터널 재소진 + 구 GitHub Pages URL 404 확인 후 터널 재기동·`VITE_API_URL` 갱신·재배포로 복구 · "gemini" 슬롯 기본 Groq 모델을 llama-3.3-70b-versatile → gpt-oss-20b로 교체 · 프론트엔드를 Vercel에도 배포하고 백엔드를 기존 AWS 인스턴스에 최신 코드로 재배포(저장소 재동기화, nginx+TLS를 새 인스턴스 IP로 재발급), CORS에 Vercel 도메인 추가 |
 | 2026-08-19 | 취향 주도 카테고리(패션의류/잡화 등)에 스타일 가이드 응답 모드 추가(검증된 후보를 스타일별로 그룹핑) · 토큰 사용량 최적화(clarify facet 추출 가드, classify_category 모델 재배정) · 저장소 전반 죽은 코드/미사용 설정·의존성 정리(백엔드·프론트엔드) · README 정리 |
+| 2026-08-20 | **다나와 스크래핑 + Tavily 검색 + Google ADK 멀티에이전트 디베이트 파이프라인 전체 제거, 11번가 오픈 API(ProductSearch) 하나로 통일**(현재 아키텍처의 골격) · 추천 Agent 추가(Qwen 임베딩 관련도 랭킹 + LLM 최종 선택, 실패 시 최저가 폴백) · HITL을 쿼리 재구성 재검색 방식에서 구조적 로컬 필터링으로 재설계(카테고리 축은 11번가가 필터 미지원이라 되묻지 않음) · Supabase 기반 LLM 응답 캐시(KV+시맨틱) 스캐폴딩 · Qwen "thinking mode" 비활성화로 응답 지연 20~95초 → 2~5초 단축 · Groq 기반 검색어 표기 변형 폴백 추가("2프로"/"이프로"/"2%" 매핑) · GitHub 브랜치 보호 규칙 추가(main은 최소 1인 승인 필수) |
 
 ### 주요 의사결정 사항
 
@@ -184,6 +186,13 @@ flowchart LR
 - **프론트엔드를 Vercel에도 배포하고 백엔드를 AWS 인스턴스로 이전**: 기존 Cloudflare Quick Tunnel을 벗어나 AWS EC2 인스턴스로 백엔드 이전(`backend/deploy/DEPLOY.md` 참고), nginx/TLS를 새 IP로 재발급. 프론트는 GitHub Pages를 유지한 채 Vercel에 추가 배포, CORS에 Vercel 도메인 추가
 - **토큰 사용량 최적화**: `_extract_clarify_options`가 후속 질의 라운드에도 무거운 facet 추출(브랜드별 최대 15개 병렬 DeepSeek 호출)을 무조건 실행하던 것을 가드 처리, 브랜드별 팬아웃도 6개로 제한. `classify_category`를 부하가 몰린 `gpt-oss-120b`에서 여유 있는 `gpt-oss-20b`로 재배정
 - **저장소 정리**: 호출부가 없는 함수/클래스, 옛 프로토타입 디렉터리, 대체된 Google Merchant/임베딩 기반 검색 캐시 모듈과 그 설정·의존성을 제거. 프론트의 미사용 멀티 대화 전환 상태, 중복 CSS 파일, 빈 PostCSS 설정 제거
+- **다나와/Tavily/ADK 멀티에이전트 파이프라인 전체 제거, 11번가 오픈 API로 통일**: 다나와는 스크래핑(HTML 파싱, IP 차단 위험)이었지만 11번가 오픈 API는 1st-party 구조화 데이터(XML)라 그 위험 자체가 없음. 관련성은 `_product_name_matches`(토큰 유사도 + 모델/규격 충돌 가드 + 상호배타 토큰 가드)로 규칙 기반 검증. 부수적으로 그 파이프라인에만 쓰이던 Tavily 검색 계층과 Google ADK(`SequentialAgent`/`ParallelAgent`, 이미 deprecated 표시였음)까지 함께 제거돼 의존성이 크게 줄었다(`google-adk`, `litellm`, `google-genai`, `beautifulsoup4`, `lxml`, `apscheduler`)
+- **추천 Agent 도입**: 규칙 기반 최저가 선택 대신, 검증된 후보를 Qwen 임베딩(`text-embedding-v3`) 코사인 유사도로 관련도순 정렬해 "관련 상품" 목록으로 노출하고, LLM(Qwen)이 가격뿐 아니라 리뷰 수·구매만족도까지 보고 최종 추천을 고름 - 실패하면 최저가 규칙 기반으로 폴백(그라운딩은 그대로 유지)
+- **HITL을 쿼리 재구성 재검색에서 구조적 필터로 재설계**: 드릴다운 후속 턴이 매번 재구성된 전체 문자열로 새로 검색하던 것을, 안정적인 `base_query`로 한 번만 검색한 뒤 사용자가 덧붙인 답을 순수 로컬 필터링(`_filter_items_by_extra_terms`)으로 좁히도록 변경 - 카테고리 축은 11번가가 카테고리 코드 필터를 지원하지 않고(실측 확인) 카테고리 이름이 상품명 텍스트에도 거의 안 나와 구조적 필터가 안 통하므로, 애초에 사용자에게 되묻지 않음(DeepSeek이 자체적으로 뽑아온 "카테고리" facet도 걸러냄)
+- **Qwen "thinking mode" 비활성화**: `qwen3.7-plus`가 DashScope 기본값으로 내부 추론 과정을 다 생성한 뒤 응답하는 모드였음이 드러남(짧은 질문에도 20~95초) - `extra_body={"enable_thinking": false}`로 2~5초까지 단축, 별도 모델 교체 없이 해결
+- **Groq 기반 검색어 표기 변형 폴백**: 11번가 검색 엔진이 사용자 표기("2프로")와 카탈로그 표기("이프로"/"2%")가 달라 관련 상품을 하나도 못 찾는 경우가 있음을 실측 확인 - 1차 검색 실패 시에만 Groq이 대안 표기를 제안해 재검색(관련성 판정도 원래 질의가 아니라 변형 표기 기준)
+- **Supabase 기반 LLM 응답 캐시 스캐폴딩**: KV(완전 일치)+시맨틱(임베딩 유사도) 2단 캐시를 facet 추출(호출당 최대 8회 LLM 호출 가능)에 배선 - `SUPABASE_URL`/`SUPABASE_KEY` 미설정 시 안전하게 no-op
+- **GitHub 브랜치 보호 규칙 추가**: `main`에 최소 1인 승인 필수 + 승인 후 새 커밋 시 재승인 필요(dismiss stale reviews) + 직접 push/force-push/삭제 차단 - 이후 작업은 브랜치 생성 → PR → 리뷰 승인 → 머지 순서로 진행
 
 ### 문제 해결 내역 (Troubleshooting)
 
@@ -217,15 +226,14 @@ flowchart LR
 
 ### 데이터 소스 및 탐색
 
-- **검색 데이터**: Tavily Search API를 통해 실시간으로 조회, 다나와 도메인으로 한정(원래 국내 리테일러 15곳이었으나, 사이트마다 페이지 구조가 달라 스니펫만으로 파싱하면 엉뚱한 상품이 섞이는 문제로 가격비교 사이트 하나로 축소)
-- **다나와 실측 데이터**: 다나와 검색결과/상세페이지를 직접 페치해 판매처별 가격 · 배송정보 · 구매 링크 가능 여부(A/B등급)를 파싱, 내부 AJAX 엔드포인트로 최저가 판매처의 실제 구매 URL까지 확보
+- **검색 데이터**: 11번가 오픈 API(ProductSearch)로 실시간 조회 - 1st-party 구조화 XML 응답(상품명 · 가격 · 판매자 · 리뷰 수 · 구매만족도 · 상세 URL이 필드로 분리돼 있어, 스크래핑처럼 스니펫에서 오파싱할 위험이 없음)
+- **카테고리 데이터**: 11번가 ProductSearch의 `option=Categories` 실측 카테고리 집계(AI 상세검색의 "카테고리" facet 후보 출처)
 - **이미지 데이터**: 사용자가 업로드한 상품 사진 → Google Cloud Vision으로 텍스트 추출
 
 ### 전처리(검색 결과 정제) 방법
 
-- 상품 상세/가격 정보가 없는 콘텐츠·매거진·검색결과 목록 도메인 제외 (`EXCLUDE_DOMAINS`)
-- 정규식 기반 제네릭 목록 URL 필터링 (`is_generic_listing_url`)
-- 브랜드-URL 그라운딩 검증으로 무관한 상품이 섞이는 것을 방지
+- 관련성 검증(`_product_name_matches`): 토큰 유사도(rapidfuzz) + 모델/규격 토큰 충돌 가드 + 상호배타 토큰 가드 3단 - 검색어와 실제로 같은 상품인지 확인된 후보만 남김
+- 검색어 표기가 카탈로그와 달라(예: "2프로") 1차 검색이 관련 상품을 하나도 못 찾으면, Groq이 대안 표기를 제안해 재검색
 - OCR 원문에서 가격/바코드/프로모션 문구를 제거하고 상품명·용량 등 핵심 메타데이터만 남기는 Groq 정제 단계(`search_query` 추출)
 
 ### 평가 기준 (무엇으로 "좋은 답"을 판단할지)
@@ -236,55 +244,43 @@ flowchart LR
 
 ### 베이스라인 대비 개선
 
-단일 LLM 호출(베이스라인) 대비, 3개 제안 모델 + 1개 심사 모델의 멀티에이전트 구조를 통해 한 모델의 편향·환각이 곧바로 최종 답이 되는 것을 방지하도록 설계했다.
+LLM에게 상품 정보를 통째로 맡기는 방식(베이스라인, 존재하지 않는 상품·가격을 지어낼 위험이 있음) 대비, 후보 자체를 11번가 오픈 API의 실측 구조화 데이터로만 구성하고 규칙 기반 관련성 검증을 먼저 거치도록 설계했다. LLM(추천 Agent)은 이미 검증된 후보 중에서 고르기만 해 그라운딩이 안 된 답을 낼 수가 없고, 실패해도 최저가 규칙 기반으로 안전하게 폴백한다.
 
-### 아키텍처 (역할 분리형 에이전트 파이프라인 · Google ADK)
+### 아키텍처 (11번가 오픈 API 기반 선형 파이프라인)
 
 ```mermaid
 sequenceDiagram
     participant U as 사용자
     participant CTX as SearchContext.runTurn
-    participant B as 백엔드(ADK 파이프라인)
-    participant Cache as 검색 캐시
-    participant T as Tavily
-    participant P as 제안 에이전트(Qwen·Groq·DeepSeek·다나와실측)
-    participant CP as 쿠팡(교차확인 · 참고신호)
-    participant D as DeepSeek(교차 검증)
-    participant J as Groq(심사)
-    participant DW as 다나와(브릿지 URL 해석)
+    participant B as 백엔드(run_elevenst_only_debate)
+    participant E as 11번가 오픈 API
+    participant G as Groq
+    participant Q as Qwen
 
     U->>CTX: 검색어 입력(첫 턴)
-    CTX->>B: POST /decide/stream (skip_intent_check=false)
-    B->>B: 질의 정제(Groq)
-    B->>Cache: 캐시 조회
-    alt 캐시 미스
-        B->>T: 다나와 한정 검색
-        T-->>B: 검색 결과
-        B->>Cache: 결과 저장
+    CTX->>B: POST /decide/stream (base_query 없음)
+    B->>E: ProductSearch(query, limit=10)
+    E-->>B: 검색 결과
+    B->>B: 관련성 검증(_product_name_matches)
+    alt 관련 상품 0건(카탈로그 표기가 다름 - 예: "2프로")
+        B->>G: 대안 표기 제안 요청
+        G-->>B: 변형 표기 목록(예: "이프로", "2%")
+        B->>E: 변형 표기로 재검색
+        E-->>B: 검색 결과
     end
-    alt 브랜드/제품/용량/개수 모호 (Human-in-the-loop)
-        B-->>CTX: mode: clarify (고정 축 옵션)
-        CTX-->>U: 새 턴으로 이어붙여 되묻기(버튼 · 채팅 둘 다)
-        U->>CTX: 옵션 선택 또는 채팅 답변(Qwen이 매칭)
-        CTX->>B: 후속 턴 POST /decide/stream (skip_intent_check=true)
-        Note over B: skip_clarify=true → 내부 애매함 판정을 건너뛰고<br/>바로 제안 단계로 진행(재질문 방지)
-    end
-    B->>P: 검색 결과 + 질의 전달 (병렬, 모델별 최선 1개)
-    P-->>B: 상품 후보 제안 (근거 포함, 다나와는 실측가)
-    B->>CP: 병렬로 쿠팡 한정 검색(후보 아님)
-    CP-->>B: 참고용 검색 결과
-    B->>B: 후보 병합 · 중복 제거(최저가 매물 기준)
-    B->>D: 병합된 후보 + 쿠팡 참고 결과로 교차 검증 요청
-    D-->>B: 검증 결과(verified 여부 · note)
-    B->>J: 검증된 후보 심사 요청
-    J-->>B: 최종 추천 + 선정 근거
-    B->>DW: 최종 URL이 다나와 페이지면 최저가 브릿지 URL 조회
-    DW-->>B: 실제 구매 가능 URL
-    B-->>CTX: 상품명 · 가격 · 판매처 · 근거 (스트리밍)
+    B->>Q: 검증된 후보 임베딩 요청
+    Q-->>B: 관련도순 정렬(코사인 유사도)
+    B->>Q: 추천 Agent 요청(가격·리뷰·구매만족도)
+    Q-->>B: 최종 추천 index + 근거
+    B-->>CTX: 상품명 · 가격 · 판매처 · 근거 + 관련 상품 목록(스트리밍)
     CTX-->>U: 대화 스레드에 결과 카드 표시
 ```
 
-짧고 애매한 검색어(예: "핸드폰")는 위 흐름 전에 `POST /decide/clarify`(다나와 검색 결과 기반 동적 facet, DeepSeek)를 먼저 시도하고, facet을 못 찾으면 그대로 `/decide/stream` 경로로 넘어간다.
+짧고 애매한 검색어(예: "핸드폰")는 위 흐름 전에 `POST /decide/clarify`(11번가 검색 결과
+기반 동적 facet, DeepSeek)를 먼저 시도한다 - 카테고리 축은 되묻지 않고, 드릴다운
+후속 턴(`base_query`가 있는 턴)은 매번 재검색하는 대신 `base_query`로 한 번만 검색한
+결과를 로컬 필터링(`_filter_items_by_extra_terms`)으로 좁혀나간다. facet을 못 찾으면
+그대로 `/decide/stream` 경로로 넘어간다.
 
 ### 트러블슈팅
 
@@ -301,6 +297,8 @@ sequenceDiagram
 - AI 상세검색(facet) 다중 라운드 시 base_query를 유지해 다나와 검색 캐시(1시간, 10초 crawl-delay)를 재사용하도록 개선해 드릴다운 응답속도 단축
 - 다나와 실측 최저가를 별도로 확보해 LLM 추정 가격 · URL의 오차를 줄이고, 최종 URL이 다나와 가격비교 페이지 자체로 남지 않도록 실제 구매처 브릿지 URL로 항상 변환
 - 멀티턴 대화 흐름에서 후속 턴에 `skip_clarify`를 적용해, 이미 답한 조건에 대해 파이프라인이 다시 되묻는 무한 재질문을 제거
+- **(2026-08-20)** Qwen(`qwen3.7-plus`)의 DashScope 기본 "thinking mode"(내부 추론 과정을 다 생성한 뒤에야 응답 반환)를 발견 - 짧은 질문 하나에도 20~95초가 걸리던 원인이었다. `extra_body={"enable_thinking": false}`로 꺼서 2~5초로 단축
+- **(2026-08-20)** AI 상세검색 드릴다운 후속 턴이 매번 재구성된 전체 문자열로 11번가를 다시 검색하던 것을, `base_query`로 한 번만 검색한 결과를 로컬 필터링으로 좁히도록 재설계해 중복 검색 제거
 
 ### 그라운딩 회귀 실험 기록
 
@@ -343,10 +341,11 @@ xychart-beta
 
 - 카카오 로그인은 REST API 키 설정을 완료했으나, 실사용 트래픽 기준의 검증은 아직 진행 전
 - 정성적 검증 위주로 진행되어, 정량적 지표(응답 정확도·지연 시간 등) 기반의 자동화된 평가 체계는 부재
-- 현재는 다나와 하나로 한정된 검색 범위를 점진적으로 확장할 여지가 있음
-- Google ADK가 출시 초기 버전(`SequentialAgent`/`ParallelAgent`가 이미 deprecated 표시)이라, 향후 문서가 더 풍부한 `Workflow`/`@node` API로의 이전을 검토할 필요가 있음
-- Human-in-the-loop을 앱 레벨의 무상태 재실행(파이프라인을 처음부터 다시 실행)으로 구현해 단계마다 정제/검색 비용이 다시 발생함 — ADK 세션 기반의 내부 pause/resume으로 전환하면 절감 가능
-- clarify의 백엔드 추출 로직은 facet(DeepSeek) 하나로 통합했지만(아래 의사결정 참고), 프론트엔드의 `FixedAxisClarifyCard`(자연어 질문 생성용 `/clarify/ask`)와 브랜드 전용 버튼 블록은 아직 별도 UI로 남아있음 — 완전한 UI 수준 수렴은 후속 과제
+- 검색 범위가 11번가 하나뿐 - 다른 오픈마켓도 구조화 API를 제공하면 같은 패턴(`fetchers/elevenst.py`)으로 확장 가능
+- 11번가 오픈 API가 카테고리 코드 필터를 지원하지 않아(dispCtgrNo를 줘도 결과가 안 바뀜을 실측 확인), AI 상세검색의 카테고리 축은 사용자에게 되묻지 않고 표본을 좁히는 데도 안 씀 - 다른 축(브랜드/모델/용량)만으로 좁혀나감
+- Supabase 기반 LLM 응답 캐시(`app/llm_cache.py`)는 스키마(`supabase/llm_cache.sql`)와 코드는 준비돼 있지만 실제 프로젝트 secret key가 아직 없어 비활성 상태(no-op) - 연결하면 별도 배포 작업 없이 바로 켜짐
+- Groq 검색어 표기 변형 재검색(`app/agents/groq.py::generate_query_variants`)은 1차 검색 실패 시에만 타는 폴백이라 평소 검색 속도에는 영향 없지만, 그 경로 자체는 추가 LLM 호출 + 재검색으로 몇 초 더 걸림
+- 프론트엔드의 `FixedAxisClarifyCard`(브랜드/제품/용량/개수 고정 축 UI)는 이제 아무 데이터도 안 받는 죽은 코드 경로 - 백엔드가 그 필드(`brands`/`products`/`volumes`/`quantities`)를 더 이상 채우지 않음, 정리는 후속 과제
 
 ### 회고
 
