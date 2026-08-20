@@ -21,6 +21,14 @@ def _client() -> AsyncOpenAI:
     return AsyncOpenAI(api_key=settings.qwen_api_key, base_url=settings.qwen_api_base, max_retries=0)
 
 
+# qwen3.7-plus는 DashScope 쪽에서 기본적으로 "thinking mode"(내부 추론 과정을
+# 다 생성한 뒤에야 응답을 반환)가 켜져 있다(2026-08-20 실측 - enable_thinking을
+# 안 주면 단순 질문 하나에도 20~95초가 걸린다, extra_body={"enable_thinking":
+# False}를 주면 2초로 줄어든다). 이 프로젝트가 쓰는 프롬프트는 전부 JSON 한
+# 덩어리만 필요해서 추론 과정 자체가 필요 없다 - 이 모듈의 모든 호출에 끈다.
+_DISABLE_THINKING = {"enable_thinking": False}
+
+
 _CLARIFY_ASK_FALLBACK = "몇 가지 후보를 찾았어요 — 아래에서 골라주시겠어요?"
 
 
@@ -37,6 +45,7 @@ async def generate_clarify_question(query: str, options: list[str]) -> str:
             model=settings.qwen_model,
             messages=[{"role": "user", "content": build_clarify_ask_prompt(query, options)}],
             response_format={"type": "json_object"},
+            extra_body=_DISABLE_THINKING,
         )
         data = parse_json_object(response.choices[0].message.content or "")
         return data.get("message") or _CLARIFY_ASK_FALLBACK
@@ -57,6 +66,7 @@ async def recommend_best(query: str, candidates: list[dict]) -> tuple[int, str] 
             model=settings.qwen_model,
             messages=[{"role": "user", "content": build_recommend_prompt(query, candidates)}],
             response_format={"type": "json_object"},
+            extra_body=_DISABLE_THINKING,
         )
         data = parse_json_object(response.choices[0].message.content or "")
         index = int(data.get("index"))
