@@ -233,7 +233,58 @@ interface Props {
   // 계정/세션 페르소나에 기록할 수 없다.
   onConfirmFacets: (selected: Record<string, string>) => void;
   onSelectClarifyOption: (step: Exclude<ClarifyStep, 'brand'>, value: string) => void;
+  // "다른 관점에서 보기" 칩(2026-08-19, 실험) - 선택 시 세션/계정 페르소나에
+  // 기록한다. 옵션.
+  onRememberPreference?: (label: string, value: string) => void;
 }
+
+// "다른 관점에서 보기" 칩(2026-08-19, 실험) - Perplexity의 "후속 질문 제안"
+// 패턴을 참고했지만, LLM이 자유 텍스트로 후속 질문을 지어내면 이 프로젝트의
+// 그라운딩 원칙(근거 없는 답은 안 한다)과 부딪힌다("가성비 좋은 곳" 같은
+// 제안은 실제로 뒷받침할 데이터가 없을 수 있음). 그래서 새로 텍스트를
+// 만들지 않고, propose 단계에서 이미 확보한 실제 proposals(URL·가격 확정)
+// 중에서만 골라 "최저가 아닌 다른 기준"을 제안한다 - 클릭하면 100% 실제
+// 구매 가능한 상품으로 이어진다. 완전한 문장형(B안)도 시도해봤지만 원래
+// 짧은 칩 형태가 더 낫다는 판단으로 되돌렸다 - 대신 어떤 후보가 지금
+// 선택된 상태인지 칩 자체에 표시(아래 isActive)해 명확성을 보완했다.
+const _parsePriceKrw = (price: string | null | undefined): number | null => {
+  if (!price) return null;
+  const digits = price.replace(/[^\d]/g, '');
+  return digits ? parseInt(digits, 10) : null;
+};
+
+interface PerspectiveSuggestion {
+  key: string;
+  label: string;
+  proposal: Proposal;
+}
+
+const _buildPerspectiveSuggestions = (
+  displayed: { url: string | null; retailer: string | null; price: string | null },
+  otherProposals: Proposal[]
+): PerspectiveSuggestion[] => {
+  const pickable = otherProposals.filter((p) => !p.error && p.url && p.product_name);
+  const suggestions: PerspectiveSuggestion[] = [];
+
+  const displayedPrice = _parsePriceKrw(displayed.price);
+  const cheaper = pickable
+    .map((p) => ({ p, price: _parsePriceKrw(p.price) }))
+    .filter((x): x is { p: Proposal; price: number } => x.price !== null)
+    .filter((x) => displayedPrice === null || x.price < displayedPrice)
+    .sort((a, b) => a.price - b.price)[0];
+  if (cheaper) {
+    suggestions.push({ key: 'cheaper', label: '💰 더 저렴한 대안', proposal: cheaper.p });
+  }
+
+  const otherRetailer = pickable.find(
+    (p) => p.url !== cheaper?.p.url && p.retailer && p.retailer !== displayed.retailer
+  );
+  if (otherRetailer) {
+    suggestions.push({ key: 'retailer', label: '🏪 다른 판매처', proposal: otherRetailer });
+  }
+
+  return suggestions;
+};
 
 export const SearchResults = ({
   result,
@@ -241,6 +292,7 @@ export const SearchResults = ({
   onSelectBrand,
   onConfirmFacets,
   onSelectClarifyOption,
+  onRememberPreference,
 }: Props) => {
   // AI 상세검색: facet마다 하나씩 고른다. 예전엔 화면에 떠 있는 기준을 전부
   // 골라야만 검색이 실행됐는데(2026-08-13: "상세검색에서 고를때마다 검색하는걸로
@@ -639,6 +691,7 @@ export const SearchResults = ({
       ? `${displayedProposers.map((a) => AGENT_LABEL[a] || a).join(' · ')} 공동 제안 채택`
       : `${AGENT_LABEL[displayedProposers[0]] || displayedProposers[0]} 제안 채택`;
   const otherProposals = proposals.filter((p) => p.url !== displayed.url);
+  const perspectiveSuggestions = _buildPerspectiveSuggestions(displayed, otherProposals);
 
   return (
     <Card>
@@ -718,6 +771,35 @@ export const SearchResults = ({
       ) : (
         otherProposals.length > 0 && (
           <div className="pt-4 border-t border-black/5">
+            {perspectiveSuggestions.length > 0 && (
+              <div className="mb-3 flex flex-wrap gap-2">
+                {perspectiveSuggestions.map((s) => {
+                  // 어떤 카드를 눌렀는지 잘 안 보인다는 피드백(2026-08-19) - 헤더의
+                  // "다른 후보 · ..." 텍스트만으로는 눈에 잘 안 띄어서, 지금
+                  // 선택된 후보와 같은 칩은 배경을 채워 눌린 상태를 명확히 표시한다.
+                  const isActive = s.proposal.url === displayed.url;
+                  return (
+                    <button
+                      key={s.key}
+                      type="button"
+                      onClick={() => {
+                        setSelectedProposalUrl(s.proposal.url);
+                        onRememberPreference?.('선호기준', s.label.replace(/^\S+\s/, ''));
+                      }}
+                      aria-pressed={isActive}
+                      className={`text-xs rounded-full border px-3 py-1.5 transition-colors cursor-pointer ${
+                        isActive
+                          ? 'bg-neutral-950 border-neutral-950 text-white font-medium shadow-sm'
+                          : 'font-light border-black/10 text-neutral-600 hover:bg-black/[0.03]'
+                      }`}
+                    >
+                      {isActive && <Check className="inline w-3 h-3 mr-1 -mt-0.5" strokeWidth={3} />}
+                      {s.label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             <span className="text-[11px] font-mono uppercase tracking-widest text-neutral-400 block mb-2">
               다른 후보
             </span>

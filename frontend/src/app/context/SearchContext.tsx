@@ -87,6 +87,11 @@ interface SearchContextValue {
   // 반영(우선순위를 앞으로 당기는 것)은 백엔드(check_clarify_facets)가 이미
   // 하므로, 여기서는 순수하게 시각적 표시 용도다.
   sessionPreferences: Record<string, string>;
+  // 최종 결과 카드의 "다른 관점에서 보기" 칩(2026-08-19, "가성비/성분 선호가
+  // 개인마다 다르니 페르소나로 반영하면 좋겠다") - facet 선택과 같은 방식으로
+  // 세션/계정 페르소나에 기록한다. 값 자체는 실제 클릭한 proposal에서 그대로
+  // 가져와야 한다(지어낸 라벨을 기록하면 다음 검색에 근거 없는 선호가 반영됨).
+  rememberPreference: (label: string, value: string) => void;
   sendMessage: (q: string) => Promise<void>;
   selectBrand: (turnId: string, brand: string) => Promise<void>;
   selectFacets: (turnId: string, selected: Record<string, string>) => Promise<void>;
@@ -556,6 +561,7 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
         ocrBusy,
         history,
         sessionPreferences,
+        rememberPreference,
         sendMessage,
         selectBrand,
         selectFacets,
