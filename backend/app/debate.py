@@ -13,7 +13,7 @@ from . import search as search_module
 from .agents import deepseek, gpt, groq, judge
 from .agents.base import NO_CANDIDATE_ERROR, is_generic_listing_url
 from .config import settings
-from .intent import is_bulk_query, is_non_product_chitchat, needs_clarification
+from .intent import is_bulk_query, is_non_product_chitchat, looks_conversational_query, needs_clarification
 from .schemas import (
     BrandOption,
     BrandPriceResponse,
@@ -764,6 +764,14 @@ async def check_clarify_facets(
         return ClarifyResponse(query=query, options=ClarifyOptions(facets=static_facets))
 
     search_query = base_query if base_query and base_query.strip() else query
+    # (2026-08-20, "'안녕 충전기 살래' 했는데도 적절한 상품을 못찾았다") -
+    # 이 함수는 adk_pipeline의 refine LlmAgent를 거치지 않는 완전히 별도
+    # 경로라, "안녕"/"살래" 같은 인사말·구매의도 문구가 정제 없이 그대로
+    # 다나와 검색어로 들어가면서 검색 자체가 잘 안 됐다. adk_pipeline의
+    # 조건부 refine과 같은 기준(looks_conversational_query)으로만 좁혀서,
+    # 이미 짧고 깨끗한 검색어("음료수" 등)는 여전히 이 호출을 건너뛴다.
+    if looks_conversational_query(search_query):
+        search_query = await groq.refine_query(search_query)
     items = await price_table_module._search_danawa_items(
         search_query, limit=price_table_module.CLARIFY_SEARCH_LIMIT
     )

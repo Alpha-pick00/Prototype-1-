@@ -1270,6 +1270,64 @@ def test_check_clarify_facets_static_cache_miss_falls_through_to_real_search(mon
     assert result.options.facets == [ClarifyFacet(label="브랜드", options=["오리온"])]
 
 
+# -- 대화체 질의 정제 (2026-08-20, "'안녕 충전기 살래' 했는데도 적절한 상품을 -----
+# 못찾았다" 리포트 - adk_pipeline의 refine과 별개로 이 함수도 자체적으로
+# 정제해야 했다) -----------------------------------------------------------
+
+
+def test_check_clarify_facets_refines_conversational_query_before_searching(monkeypatch):
+    """"안녕 충전기 살래"처럼 인사말/구매의도 문구가 섞인 질의는 groq.refine_query로
+    정제한 뒤에야 다나와 검색에 써야 한다 - 원본 그대로 검색하면 잡음 때문에
+    실제 상품을 잘 못 찾는다."""
+    from app.agents import groq
+
+    captured_search_query: list[str] = []
+
+    async def _fake_search_danawa(query, limit=3):
+        captured_search_query.append(query)
+        return [{"pcode": "1", "product_name": "삼성전자 25W 고속충전기", "total_mall_count": None}]
+
+    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
+
+    async def _fake_refine_query(query):
+        assert query == "안녕 충전기 살래"
+        return "충전기"
+
+    monkeypatch.setattr(groq, "refine_query", _fake_refine_query)
+
+    async def _fake_extract_facets(query, names):
+        return []
+
+    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
+
+    asyncio.run(check_clarify_facets("안녕 충전기 살래"))
+
+    assert captured_search_query == ["충전기"]
+
+
+def test_check_clarify_facets_skips_refine_for_already_clean_query(monkeypatch):
+    """"과자"처럼 이미 짧고 깨끗한 검색어는 groq.refine_query를 아예 호출하지
+    않아야 한다 - 매번 불렀다면 이번 세션에서 줄인 LLM 호출 수가 다시 늘어난다."""
+    from app.agents import groq
+
+    async def _fake_search_danawa(query, limit=3):
+        return [{"pcode": "1", "product_name": "오리온 초코파이", "total_mall_count": None}]
+
+    monkeypatch.setattr("fetchers.danawa_search.search_danawa", _fake_search_danawa)
+
+    async def _fail_if_called(query):
+        raise AssertionError("이미 깨끗한 검색어인데 refine_query가 호출됐다")
+
+    monkeypatch.setattr(groq, "refine_query", _fail_if_called)
+
+    async def _fake_extract_facets(query, names):
+        return []
+
+    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
+
+    asyncio.run(check_clarify_facets("과자"))
+
+
 def test_check_clarify_facets_returns_facets_for_ambiguous_query(monkeypatch):
     async def _fake_search_danawa(query, limit=3):
         return [

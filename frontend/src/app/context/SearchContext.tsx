@@ -115,6 +115,28 @@ export const dedupeAppend = (base: string, addition: string): string => {
   return [...baseTokens, ...newTokens].join(' ');
 };
 
+// (2026-08-20, 사용자 리포트 "'안녕 충전기 사고싶어'했는데 facet 고르니까
+// '안녕 충전기 사고싶어 고속충전 케이블'로 검색이 다시 되는데 이상하지 않니") -
+// selectFacets/selectClarifyOption이 origin.requestQuery(원본 타이핑 그대로)
+// 뒤에 고른 facet 값을 계속 이어붙이다 보니, 인사말/구매의도 문구("안녕",
+// "사고싶어")가 라운드를 거듭할수록 그대로 남거나 반복 노출됐다. 백엔드
+// refine(app.intent.looks_conversational_query + adk_pipeline의 조건부 refine)이
+// 실제 검색에 쓰는 텍스트는 이미 정제하지만, 프론트가 표시/누적하는 텍스트
+// 자체는 정제되지 않은 원본이라 말풍선이 지저분해 보였다. LLM 호출 없이(채팅
+// 턴마다 왕복 추가하지 않기 위해) 자주 나오는 인사말 접두사와 구매의도
+// 문구만 정규식으로 걷어낸다 - "충전기 케이블"처럼 이미 깔끔한 검색어는
+// 건드리지 않는다. 실제 검색 정확도는 여전히 백엔드 refine이 책임진다 -
+// 이건 어디까지나 화면에 보이는/다음 라운드에 이어붙이는 텍스트를 깔끔하게
+// 유지하기 위한 보조 정리다.
+const GREETING_PREFIX_RE = /^(안녕(하세요|하십니까)?|안뇽|하이|hi|hello|헬로+우?)[\s,!.?~♡]+/i;
+const BUY_INTENT_RE = /(사고\s*싶(다|어|어요|습니다)?|사려고(요)?|구매하고\s*싶(다|어|어요|습니다)?|구매하려(고|고요)?|사줘(요)?|살래(요)?)/g;
+
+export const stripConversationalWrapper = (query: string): string => {
+  const withoutGreeting = query.trim().replace(GREETING_PREFIX_RE, '');
+  const withoutBuyIntent = withoutGreeting.replace(BUY_INTENT_RE, ' ');
+  return withoutBuyIntent.replace(/\s+/g, ' ').trim();
+};
+
 // 고정 축(product/volume/quantity) -> 사용자 페르소나 라벨 매핑. AI
 // 상세검색(facet)과 서로 다른 라벨 체계를 쓰므로("volume" vs 실제 facet 라벨
 // "용량"), 향후 facet 재정렬에서 실제로 매칭될 수 있는 축(용량)만 공용 라벨로
@@ -381,7 +403,11 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
     const values = Object.values(selected);
     if (!origin || !conversation || values.length === 0) return;
     Object.entries(selected).forEach(([label, value]) => rememberPreference(label, value));
-    const combined = values.reduce((acc, value) => dedupeAppend(acc, value), origin.requestQuery).trim();
+    // 인사말/구매의도 문구를 걷어낸 뒤에 이어붙인다(stripConversationalWrapper
+    // 주석 참고) - 걷어낸 결과가 비면(예: 원본이 "안녕"뿐이었던 극단적인 경우)
+    // 원본을 그대로 쓴다.
+    const cleanedOrigin = stripConversationalWrapper(origin.requestQuery) || origin.requestQuery;
+    const combined = values.reduce((acc, value) => dedupeAppend(acc, value), cleanedOrigin).trim();
     // 2026-08-18(사용자 리포트: "핸드폰 한다음에 샤오미 넣었는데 샤오미만 다시
     // 검색되는게 뭐하는거야 '핸드폰 샤오미' 이렇게 전에 했던것도 붙여서 넣어야지")
     // - 실제로 백엔드에 보내는 requestQuery(=combined)는 이미 이전 검색어까지
@@ -403,7 +429,8 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
     const personaLabel = CLARIFY_STEP_PERSONA_LABEL[step];
     const personaOverride = personaLabel ? { [personaLabel]: value } : undefined;
     if (personaLabel) rememberPreference(personaLabel, value);
-    const combined = dedupeAppend(origin.requestQuery, value).trim();
+    const cleanedOrigin = stripConversationalWrapper(origin.requestQuery) || origin.requestQuery;
+    const combined = dedupeAppend(cleanedOrigin, value).trim();
     // 2026-08-18: selectFacets와 같은 이유로 displayQuery도 combined로 맞춘다 -
     // 방금 고른 값만 보여주면 이전 검색어가 빠진 것처럼 보인다.
     const turn = newTurn(combined, combined, undefined, origin.baseQuery);

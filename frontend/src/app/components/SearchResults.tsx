@@ -391,6 +391,28 @@ export const SearchResults = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(pendingFreeTextFacets), JSON.stringify(effectiveSelectedFacets), result.mode, result.query]);
 
+  // (2026-08-20, 사용자 요청: "AI 상세검색에서 버튼을 다 누르면 검색하기 버튼을
+  // 안눌러도 자동으로 검색되는 기능 추가") - "일부분만 선택해도 넘어갈 수
+  // 있게"(2026-08-14)라는 결정 때문에 "검색하기" 버튼 자체는 그대로 두지만,
+  // 화면에 뜬 축을 전부 답했으면 그 버튼을 또 누르게 하지 않고 바로 진행한다.
+  // 2026-08-18에 "옵션 클릭마다 즉시 검색"을 되돌린 적이 있는데(위 selectFacetOption
+  // 주석 참고) - 그건 첫 클릭에서 곧장 다음 턴으로 넘어가 두 번째 축을 고를
+  // 기회 자체가 없어지는 문제였다. 이건 "모든 축을 다 고른 뒤"에만 한 번
+  // 트리거되므로 그 문제를 재현하지 않는다. hasAutoSubmittedRef는 이 컴포넌트
+  // 인스턴스당(=이 라운드당) 한 번만 쏘게 막는다 - 매 렌더 재계산되는
+  // effectiveSelectedFacets/displayFacets를 의존성으로 써도 중복 제출은 없다.
+  const hasAutoSubmittedRef = useRef(false);
+  useEffect(() => {
+    if (result.mode !== 'clarify') return;
+    if (hasAutoSubmittedRef.current) return;
+    if (displayFacets.length === 0) return;
+    const allAnswered = displayFacets.every((facet) => Boolean(effectiveSelectedFacets[facet.label]));
+    if (!allAnswered) return;
+    hasAutoSubmittedRef.current = true;
+    onConfirmFacets(effectiveSelectedFacets);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result.mode, JSON.stringify(displayFacets.map((f) => f.label)), JSON.stringify(effectiveSelectedFacets)]);
+
   if (result.mode === 'clarify') {
     const { brands, products, volumes, quantities } = result.options;
     const hasAnyOptions =

@@ -1,8 +1,12 @@
+import logging
+
 from openai import AsyncOpenAI
 
 from ..config import settings
 from ..schemas import BulkProposal, SearchResult
-from .base import build_bulk_prompt, filter_bulk_options, parse_json_array
+from .base import build_bulk_prompt, build_refine_query_prompt, filter_bulk_options, parse_json_array, parse_json_object
+
+logger = logging.getLogger(__name__)
 
 # 이 모듈이 담당하는 에이전트 슬롯은 스키마/프론트엔드/테스트 전반에서
 # agent="groq"로 식별된다(파일명·함수명도 그대로). 원래는 실제로 Google Gemini를
@@ -36,3 +40,29 @@ async def propose_bulk(query: str, search_results: list[SearchResult]) -> BulkPr
         return BulkProposal(agent="groq", options=options)
     except Exception as exc:
         return BulkProposal(agent="groq", error=str(exc))
+
+
+async def refine_query(query: str) -> str:
+    """대화체/인사말이 섞인 질의를 실제 검색어로 정제한다(2026-08-20, "안녕
+    충전기 살래"가 적절한 상품을 못 찾는 리포트) - app.debate.check_clarify_facets
+    (AI 상세검색)는 adk_pipeline의 refine LlmAgent를 거치지 않는 완전히 별도
+    경로라, 그쪽에 조건부로 재도입한 refine과 별개로 이 함수가 필요했다.
+    같은 프롬프트(REFINE_QUERY_INSTRUCTIONS)와 같은 모델(groq_refine_model -
+    구조화 출력 지원, adk_pipeline._build_refine_agent 참고)을 그대로 재사용해
+    두 경로의 정제 결과가 어긋나지 않게 한다. 실패하면(API 오류, JSON 파싱
+    실패, 빈 응답 등) 원본 질의를 그대로 돌려준다 - 정제 실패가 검색 자체를
+    막으면 안 된다(호출부가 이미 "정제 없이도 원본으로 계속 진행" 가능하도록
+    짜여 있다)."""
+    try:
+        client = _client()
+        response = await client.chat.completions.create(
+            model=settings.groq_refine_model,
+            messages=[{"role": "user", "content": build_refine_query_prompt(query)}],
+            response_format={"type": "json_object"},
+        )
+        data = parse_json_object(response.choices[0].message.content or "")
+        refined = data.get("query")
+        return refined.strip() if isinstance(refined, str) and refined.strip() else query
+    except Exception:
+        logger.exception("질의 정제 실패, 원본 질의로 진행: %r", query)
+        return query
