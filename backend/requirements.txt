@@ -3,8 +3,6 @@ uvicorn[standard]==0.34.0
 python-dotenv==1.0.1
 openai==2.53.0
 google-genai==2.16.0
-google-api-python-client==2.198.0
-google-auth==2.56.3
 httpx==0.28.1
 python-multipart==0.0.20
 pyjwt==2.13.0

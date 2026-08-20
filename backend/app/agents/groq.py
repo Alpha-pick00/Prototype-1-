@@ -18,7 +18,7 @@ from .base import build_bulk_prompt, filter_bulk_options, parse_json_array
 
 
 def _client() -> AsyncOpenAI:
-    # max_retries=0 - embeddings.py와 동일한 이유(사용자 요청, 2026-08-15: "너무
+    # max_retries=0 - 사용자 요청(2026-08-15: "너무
     # 느려 더 빠르게"). 실패해도 호출부가 이미 폴백을 갖고 있어 SDK 재시도로
     # 얻는 이득보다 지연 비용이 크다.
     return AsyncOpenAI(api_key=settings.groq_api_key, base_url=settings.groq_api_base, max_retries=0)

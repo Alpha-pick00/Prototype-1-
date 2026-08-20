@@ -57,7 +57,7 @@ def _fallback_local_cleanup(raw_text: str) -> str:
 
 
 async def _call_groq_cleanup(raw_text: str) -> OcrCleanupResult:
-    # max_retries=0 - embeddings.py와 동일한 이유(사용자 요청, 2026-08-15: "너무
+    # max_retries=0 - 사용자 요청(2026-08-15: "너무
     # 느려 더 빠르게"). SDK 자체 재시도(지수 백오프)와 아래 clean()의 수동
     # 재시도(1초 고정 지연, _MAX_ATTEMPTS)가 겹치면 실패 시 지연이 배가되므로,
     # 재시도는 clean() 쪽 한 곳에서만 통제한다.

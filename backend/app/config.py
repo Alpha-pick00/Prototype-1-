@@ -7,12 +7,6 @@ load_dotenv()
 
 
 class Settings:
-    # openai_api_key는 이제 embeddings.py(검색 캐시 의미 기반 매칭)에서만 쓴다 -
-    # "gpt" 에이전트 슬롯 자체는 2026-08-15부터 OpenAI 토큰 소진으로 Qwen(DashScope)
-    # 으로 옮겼다(agents/gpt.py 참고 - 파일/함수/agent="gpt" 식별자는 스키마·
-    # 프론트엔드·테스트 전반에 걸쳐 있어 그대로 두고, 내부에서 호출하는 모델만
-    # 바꿨다). 아래 qwen_api_key가 그 슬롯의 실제 자격증명이다.
-    openai_api_key: str | None = os.environ.get("OPENAI_API_KEY")
     qwen_api_key: str | None = os.environ.get("QWEN_API_KEY")
     # DashScope는 리전마다 별도 엔드포인트/계정이다 - 이전에 이 프로젝트가 Qwen을
     # 붙였다가 "Model Studio 계정의 과금 플랜 활성화 문제"로 포기한 적이 있는데
@@ -24,8 +18,6 @@ class Settings:
     )
     deepseek_api_key: str | None = os.environ.get("DEEPSEEK_API_KEY")
     tavily_api_key: str | None = os.environ.get("TAVILY_API_KEY")
-    google_merchant_id: str | None = os.environ.get("GOOGLE_MERCHANT_ID")
-    google_service_account_file: str | None = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE")
 
     # 2026-08-18("qwen 3.7 + 로 모델 바꿔줘") - qwen-max에서 Qwen3.7 세대의
     # plus 등급으로 교체. 필요하면 .env의 QWEN_MODEL로 다른 버전(예:
@@ -43,8 +35,10 @@ class Settings:
     # 유지한 건 리네임 비용이 훨씬 컸기 때문).
     groq_api_key: str | None = os.environ.get("GROQ_API_KEY")
     groq_api_base: str = os.environ.get("GROQ_API_BASE", "https://api.groq.com/openai/v1")
-    # 카테고리분류/OCR 텍스트 정리/propose의 "groq" 슬롯이 공통으로 쓰는 범용
-    # 모델. 원래는 Groq 무료(on-demand) 티어의 분당 토큰(TPM) 한도가 가장 넉넉한
+    # OCR 텍스트 정리/propose의 "groq" 슬롯/대량구매(bulk) propose·심사가 공통으로
+    # 쓰는 범용 모델(카테고리분류는 2026-08-19부터 groq_refine_model로 옮겼다 -
+    # 바로 아래 groq_refine_model 주석 참고). 원래는 Groq 무료(on-demand) 티어의
+    # 분당 토큰(TPM) 한도가 가장 넉넉한
     # llama-3.3-70b-versatile을 썼는데(검색 결과 12건을 그대로 프롬프트에 넣으면
     # 이 한도를 매번 초과했다 - agents/base.py의 _SNIPPET_MAX_CHARS로 기본 해결),
     # 2026-08-18 llama-3.3-70b-versatile이 Groq에서 완전히 내려가(계정
@@ -65,17 +59,23 @@ class Settings:
     # response_format=json_schema로 요청한다 - groq/compound-mini는 이를 지원하지
     # 않는다("This model does not support response format json_schema"). 구조화
     # 출력을 지원하는 gpt-oss 계열 중 작은 쪽을 refine 전용으로 따로 둔다.
+    #
+    # 카테고리분류(app/category.py::classify_category)도 2026-08-19부터 이
+    # 모델을 같이 쓴다(원래 groq_model=120b) - 스타일 가이드 게이트 때문에
+    # 검색마다 무조건 한 번씩 불려서 사실상 매 요청 실행되는데, 120b 쪽에는
+    # 이미 propose·judge·style_guide가 몰려있어 이 계정의 Groq 일일 한도
+    # (모델별 200,000 토큰)를 가장 먼저 소진했다(실측 2026-08-19: 199,917/
+    # 200,000). 분류는 16개 중 하나 + 불리언 하나 고르는 단순 작업이라 120b급
+    # 추론이 필요하지 않다고 보고 옮겼다 - 예전에 propose+분류+OCR "셋을
+    # 한꺼번에" 이 모델로 옮겼다가 오히려 이 모델이 더 빨리 고갈된 적이 있지만
+    # (바로 위 groq_model 주석 참고), 이번엔 분류 하나만 옮겨 두 모델의 부하를
+    # 더 고르게 나누는 것뿐이라 같은 문제가 재현될 가능성은 낮다고 판단했다.
     groq_refine_model: str = os.environ.get("GROQ_REFINE_MODEL", "openai/gpt-oss-20b")
     # judge(최종 심사)도 output_schema가 필요해 같은 gpt-oss 계열이지만, propose
     # 쪽보다 큰 120b를 따로 써서 최소한의 판단력 격차를 둔다.
     groq_judge_model: str = os.environ.get("GROQ_JUDGE_MODEL", "openai/gpt-oss-120b")
 
     google_vision_api_key: str | None = os.environ.get("GOOGLE_VISION_API_KEY")
-
-    # 검색 캐시의 의미 기반(임베딩) 매칭 on/off. openai_api_key는 이제 이 임베딩
-    # 조회에서만 쓰이지만, 그것과 별개로 이 기능 자체만 끄고 싶을 때를 위한
-    # 스위치를 그대로 둔다.
-    semantic_cache_enabled: bool = os.environ.get("SEMANTIC_CACHE_ENABLED", "true").lower() != "false"
 
     # 소셜 로그인 (Google Client ID는 프론트엔드 VITE_GOOGLE_CLIENT_ID로만 쓰임 —
     # access_token으로 유저 정보를 조회하는 방식이라 백엔드는 client id가 필요 없다)

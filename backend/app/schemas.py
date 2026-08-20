@@ -38,12 +38,6 @@ class AgentCandidate(BaseModel):
     reasoning: str | None = None
 
 
-class AgentCandidates(BaseModel):
-    agent: AgentName
-    candidates: list[AgentCandidate] = []
-    error: str | None = None
-
-
 class RefinedQuery(BaseModel):
     query: str
     error: str | None = None

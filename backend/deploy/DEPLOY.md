@@ -25,10 +25,6 @@ cp .env.example .env
 vi .env   # 실제 API 키 채워넣기 (이 파일은 git에 올라가지 않음)
 ```
 
-Google Merchant를 쓴다면 서비스 계정 JSON 키를 `deploy/secrets/service-account.json`
-에 두고, `.env`의 `GOOGLE_SERVICE_ACCOUNT_FILE`은 컨테이너 내부 경로인
-`/secrets/service-account.json`으로 적는다. 안 쓰면 비워둬도 됨 (자동으로 기능만 비활성화).
-
 ## 2. 백엔드 실행
 
 ```bash

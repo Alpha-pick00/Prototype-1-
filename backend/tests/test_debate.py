@@ -207,6 +207,41 @@ def test_extract_clarify_options_returns_none_when_facet_already_resolved_in_que
     assert asyncio.run(_extract_clarify_options("생수 500ml", results)) is None
 
 
+# -- 토큰 절약(2026-08-19): _extract_clarify_options의 needs_clarification/
+# facet_cache 가드 ------------------------------------------------------------
+
+
+def test_extract_clarify_options_skips_llm_for_specific_query(monkeypatch):
+    """구체적인 검색어(needs_clarification()이 False)는 브랜드별 최대 15개
+    병렬 호출까지 갈 수 있는 _extract_facets를 아예 태우지 않아야 한다."""
+
+    async def _boom(query, names, required_labels=None):
+        raise AssertionError("구체적인 검색어인데 extract_facets_from_names가 호출됐다")
+
+    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _boom)
+
+    results = [_search_result("삼성전자 갤럭시 버즈3 프로 그래파이트", "https://prod.danawa.com/info?pcode=1")]
+
+    assert asyncio.run(_extract_clarify_options("삼성전자 갤럭시 버즈3 프로 그래파이트", results)) is None
+
+
+def test_extract_clarify_options_uses_static_cache_without_llm_call(monkeypatch):
+    """facet_cache에 있는 카테고리는 DeepSeek 호출 없이 정적 facet으로 즉시
+    답해야 한다(check_clarify_facets와 동일한 가드)."""
+
+    async def _boom(query, names, required_labels=None):
+        raise AssertionError("정적 캐시에 있는 카테고리인데 extract_facets_from_names가 호출됐다")
+
+    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _boom)
+
+    results = [_search_result("아이폰 케이스", "https://prod.danawa.com/info?pcode=1")]
+
+    response = asyncio.run(_extract_clarify_options("아이폰", results))
+
+    assert response is not None
+    assert response.options.facets
+
+
 # --- 하이퍼그래프 incidence 기반 facet 크로스필터/정렬(2026-08-16) -----------
 # _attach_facet_crossfilter가 상품명을 매번 재스캔하는 브루트포스 대신
 # _build_facet_value_incidence(facet 값 -> 등장하는 상품 인덱스 집합)의 교집합

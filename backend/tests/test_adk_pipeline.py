@@ -19,6 +19,7 @@ from app.adk_pipeline import (
     _pick_and_verify_relaxed,
     _relaxed_fallback_decision,
     _skip_judge_if_single_candidate,
+    _urls_needing_challenge_extract,
     _urls_to_extract,
     _verify_relaxed_verdict,
 )
@@ -621,6 +622,33 @@ def test_urls_to_extract_caps_at_max_candidates():
     candidates = [{"url": f"https://coupang.com/vp/products/{i}"} for i in range(20)]
     urls = _urls_to_extract(candidates)
     assert len(urls) == 10
+
+
+# --- _urls_needing_challenge_extract (danawa 픽은 challenge 검증을 안 쓰므로 제외) --
+
+
+def test_urls_needing_challenge_extract_excludes_danawa_proposed_candidate():
+    candidates = [
+        {"url": COUPANG_URL, "proposed_by": ["gpt"]},
+        {"url": ELEVENST_URL, "proposed_by": ["danawa"]},
+    ]
+    assert _urls_needing_challenge_extract(candidates) == [COUPANG_URL]
+
+
+def test_urls_needing_challenge_extract_keeps_danawa_domain_url_not_proposed_by_danawa_node():
+    danawa_url = "https://prod.danawa.com/info/?pcode=1"
+    candidates = [{"url": danawa_url, "proposed_by": ["gpt", "deepseek"]}]
+    assert _urls_needing_challenge_extract(candidates) == [danawa_url]
+
+
+def test_urls_needing_challenge_extract_excludes_when_danawa_merged_with_other_agents():
+    candidates = [{"url": COUPANG_URL, "proposed_by": ["gpt", "danawa"]}]
+    assert _urls_needing_challenge_extract(candidates) == []
+
+
+def test_urls_needing_challenge_extract_handles_missing_proposed_by():
+    candidates = [{"url": COUPANG_URL}]
+    assert _urls_needing_challenge_extract(candidates) == [COUPANG_URL]
 
 
 # --- _judge_eligible_proposals (verified=False 후보 judge 이전 필터링) -----

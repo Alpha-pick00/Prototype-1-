@@ -77,8 +77,6 @@ export interface Conversation {
 
 interface SearchContextValue {
   turns: ChatTurn[];
-  conversations: Conversation[];
-  activeConversationId: string | null;
   isBusy: boolean;
   ocrBusy: boolean;
   history: HistoryEntry[];
@@ -100,7 +98,6 @@ interface SearchContextValue {
   editTurn: (turnId: string, newQuery: string) => Promise<void>;
   handleImageUpload: (file: File) => Promise<void>;
   handleReset: () => void;
-  switchConversation: (id: string) => void;
   loadFromHistory: (entry: HistoryEntry) => void;
   deleteFromHistory: (id: string) => void;
   clearAllHistory: () => void;
@@ -513,10 +510,6 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
     setActiveConversationId(null);
   };
 
-  const switchConversation = (id: string) => {
-    setActiveConversationId(id);
-  };
-
   const loadFromHistory = (entry: HistoryEntry) => {
     const turn: ChatTurn = {
       ...newTurn(entry.query, entry.query),
@@ -555,8 +548,6 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
     <SearchContext.Provider
       value={{
         turns,
-        conversations,
-        activeConversationId,
         isBusy,
         ocrBusy,
         history,
@@ -570,7 +561,6 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
         editTurn,
         handleImageUpload,
         handleReset,
-        switchConversation,
         loadFromHistory,
         deleteFromHistory,
         clearAllHistory,

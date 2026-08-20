@@ -308,6 +308,13 @@ async def _finalize_danawa_only(
 # 여기서 또 search.danawa.com을 때리면 본전도 못 찾는다).
 MIN_FILTERED_CLARIFY_ITEMS = 3
 
+# _enrich_facets_per_brand가 브랜드당 병렬 DeepSeek 호출을 최대 몇 개까지
+# 내보낼지(토큰 절약, 2026-08-19) - brand_facet.options는 이미 인기순이라
+# 상위 몇 개만 보강해도 실사용 대부분을 커버한다. 표시되는 브랜드 목록
+# 자체(최대 MAX_BRAND_OPTIONS=15)는 그대로고, 이 값은 그중 몇 개까지
+# "다른 축도 더 채워줄지"만 정한다.
+_MAX_BRAND_ENRICH_FANOUT = 6
+
 
 def _normalize_for_match(text: str) -> str:
     return re.sub(r"\s+", "", text).lower()
@@ -356,7 +363,16 @@ async def _enrich_facets_per_brand(
     나빠지지 않는다.
 
     names는 상품명 문자열 목록이면 출처는 무관하다(2026-08-16, _extract_facets
-    통합 - 다나와 직접 검색 결과든 Tavily 검색 결과 제목이든 상관없음)."""
+    통합 - 다나와 직접 검색 결과든 Tavily 검색 결과 제목이든 상관없음).
+
+    토큰 절약(2026-08-19) - brand_facet.options는 이미 extract_facets_from_names가
+    인기순으로 정렬해뒀다(브랜드는 _WIDE_CAP_LABEL_PATTERN이라 최대
+    MAX_BRAND_OPTIONS=15개까지 남아있을 수 있음). 15개 전부를 병렬 DeepSeek
+    호출로 보강하면 이 함수 하나가 요청 한 번에 최대 15번 DeepSeek를 부른다 -
+    실제로 이득을 보는 쪽은 상위 소수 브랜드다(사용자가 실제로 고르는 것도
+    거의 항상 인기 브랜드). 상위 _MAX_BRAND_ENRICH_FANOUT개만 보강하고 나머지는
+    (전체 표본 기준 인기순 정렬 결과를) 그대로 둔다 - 표시되는 브랜드 개수 자체는
+    그대로고, 인기 브랜드 몇 개만 시리즈/모델 같은 다른 축이 더 풍부해진다."""
     brand_facet = next((f for f in facets if deepseek._BRAND_LABEL_PATTERN.search(f.label)), None)
     if brand_facet is None or len(brand_facet.options) < 2:
         return facets
@@ -365,13 +381,14 @@ async def _enrich_facets_per_brand(
     if not other_labels:
         return facets
 
+    brands_to_enrich = brand_facet.options[:_MAX_BRAND_ENRICH_FANOUT]
     try:
         per_brand_facets = await asyncio.gather(
             *(
                 deepseek.extract_facets_from_names(
                     query, _items_for_brand(brand, names), required_labels=other_labels
                 )
-                for brand in brand_facet.options
+                for brand in brands_to_enrich
             )
         )
     except Exception:
@@ -945,10 +962,26 @@ async def _extract_clarify_options(query: str, results: list[SearchResult]) -> C
     프롬프트(build_facet_clarify_prompt) 자체가 이미 검색 결과에 실제로 의미
     있는 축만 뽑도록 유도해서, 무의미한 facet이 거의 안 생길 가능성이 높다.
     실제로 문제가 확인되면 라벨 패턴 매칭으로 후속 추가한다(고정 4축 전용이던
-    예전 구현은 죽은 코드 정리 과정에서 제거했다)."""
-    filtered_results = _filter_listing_pages(results)
-    names = [r.title for r in filtered_results]
-    facets = await _extract_facets(query, names)
+    예전 구현은 죽은 코드 정리 과정에서 제거했다).
+
+    토큰 절약(2026-08-19) - check_clarify_facets(다나와 직접 검색 경로)는
+    needs_clarification()/chitchat/facet_cache 가드를 이미 거치는데, 이 함수는
+    같은 _extract_facets(브랜드별 최대 15개 병렬 DeepSeek 호출 + 기종 생태계별
+    2개 추가 호출까지 갈 수 있는 무거운 파이프라인)를 이 가드 없이 매 요청마다
+    무조건 태우고 있었다(실측: run_stream의 검색 직후 안전망이 skip_clarify와
+    무관하게 이 함수를 항상 호출 - skip_clarify=True인 후속 라운드에서도 결과가
+    버려질 뿐 호출 자체는 그대로 나갔다). 같은 가드를 여기도 적용해 애초에 좁혀야
+    할 필요가 없는(또는 잡담인) 질의는 DeepSeek를 한 번도 부르지 않고 즉시 끝내고,
+    흔한 카테고리는 facet_cache 정적 매칭으로 대체한다."""
+    if not needs_clarification(query) or is_non_product_chitchat(query):
+        return None
+    static_facets = facet_cache.lookup(query)
+    if static_facets is not None:
+        facets = _strip_query_answered_options(query, static_facets)
+    else:
+        filtered_results = _filter_listing_pages(results)
+        names = [r.title for r in filtered_results]
+        facets = await _extract_facets(query, names)
     if _resolved_facet_count(query, facets) >= _MAX_CLARIFY_ROUNDS:
         return None
     facets = _strip_resolved_facets(query, facets)

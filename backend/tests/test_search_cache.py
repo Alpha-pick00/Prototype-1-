@@ -14,103 +14,84 @@ def _backdate(db_path, query_key: str, created_at: float) -> None:
     conn.close()
 
 
-def test_cosine_similarity_parallel_orthogonal_opposite():
-    assert search_cache._cosine_similarity([1.0, 0.0], [1.0, 0.0]) == 1.0
-    assert search_cache._cosine_similarity([1.0, 0.0], [0.0, 1.0]) == 0.0
-    assert search_cache._cosine_similarity([1.0, 0.0], [-1.0, 0.0]) == -1.0
-
-
-def test_find_similar_returns_best_match_above_threshold_and_bumps_hits(tmp_path, monkeypatch):
+def test_get_returns_none_when_not_cached(tmp_path, monkeypatch):
     monkeypatch.setattr(search_cache, "DB_PATH", tmp_path / "cache.db")
-    search_cache.set("무선 이어폰", RESULT, embedding=[1.0, 0.0])
 
-    match = search_cache.find_similar([1.0, 0.0])
+    assert search_cache.get("무선 이어폰") is None
 
-    assert match is not None
-    key, results, score = match
-    assert key == "무선 이어폰"
-    assert results[0].url == RESULT[0].url
-    assert score == 1.0
+
+def test_set_then_get_returns_cached_results(tmp_path, monkeypatch):
+    monkeypatch.setattr(search_cache, "DB_PATH", tmp_path / "cache.db")
+
+    search_cache.set("무선 이어폰", RESULT)
+
+    cached = search_cache.get("무선 이어폰")
+    assert cached is not None
+    assert cached[0].url == RESULT[0].url
+
+
+def test_get_normalizes_whitespace_and_case(tmp_path, monkeypatch):
+    monkeypatch.setattr(search_cache, "DB_PATH", tmp_path / "cache.db")
+
+    search_cache.set("무선  이어폰", RESULT)
+
+    assert search_cache.get("무선 이어폰") is not None
+
+
+def test_set_does_not_cache_empty_results(tmp_path, monkeypatch):
+    monkeypatch.setattr(search_cache, "DB_PATH", tmp_path / "cache.db")
+
+    search_cache.set("무선 이어폰", [])
+
+    assert search_cache.get("무선 이어폰") is None
+
+
+def test_get_returns_none_when_expired(tmp_path, monkeypatch):
+    monkeypatch.setattr(search_cache, "DB_PATH", tmp_path / "cache.db")
+    search_cache.set("무선 이어폰", RESULT)
+    _backdate(tmp_path / "cache.db", "무선 이어폰", time.time() - search_cache.TTL_SECONDS - 1)
+
+    assert search_cache.get("무선 이어폰") is None
+
+
+def test_get_increments_hits(tmp_path, monkeypatch):
+    monkeypatch.setattr(search_cache, "DB_PATH", tmp_path / "cache.db")
+    search_cache.set("무선 이어폰", RESULT)
+
+    search_cache.get("무선 이어폰")
+    search_cache.get("무선 이어폰")
 
     conn = sqlite3.connect(tmp_path / "cache.db")
     hits = conn.execute("SELECT hits FROM search_cache WHERE query_key = ?", ("무선 이어폰",)).fetchone()[0]
-    assert hits == 1
+    assert hits == 2
 
 
-def test_find_similar_returns_none_below_threshold(tmp_path, monkeypatch):
+def test_set_overwrites_existing_entry(tmp_path, monkeypatch):
     monkeypatch.setattr(search_cache, "DB_PATH", tmp_path / "cache.db")
-    search_cache.set("무선 이어폰", RESULT, embedding=[1.0, 0.0])
+    search_cache.set("무선 이어폰", RESULT)
 
-    match = search_cache.find_similar([0.0, 1.0])  # 직교 = 완전 무관
+    updated = [SearchResult(title="새 상품", url="https://coupang.com/vp/products/2", snippet="설명2")]
+    search_cache.set("무선 이어폰", updated)
 
-    assert match is None
+    cached = search_cache.get("무선 이어폰")
+    assert cached[0].url == updated[0].url
 
 
-def test_find_similar_excludes_expired_rows(tmp_path, monkeypatch):
+def test_top_queries_orders_by_hits_desc(tmp_path, monkeypatch):
     monkeypatch.setattr(search_cache, "DB_PATH", tmp_path / "cache.db")
-    search_cache.set("무선 이어폰", RESULT, embedding=[1.0, 0.0])
-    _backdate(tmp_path / "cache.db", "무선 이어폰", time.time() - search_cache.TTL_SECONDS - 1)
+    search_cache.set("무선 이어폰", RESULT)
+    search_cache.set("생수", RESULT)
+    search_cache.get("생수")
+    search_cache.get("생수")
+    search_cache.get("무선 이어폰")
 
-    match = search_cache.find_similar([1.0, 0.0])
-
-    assert match is None
+    assert search_cache.top_queries(limit=10) == ["생수", "무선 이어폰"]
 
 
-def test_find_similar_skips_rows_without_embedding(tmp_path, monkeypatch):
+def test_top_queries_excludes_below_min_hits(tmp_path, monkeypatch):
     monkeypatch.setattr(search_cache, "DB_PATH", tmp_path / "cache.db")
-    search_cache.set("무선 이어폰", RESULT)  # embedding 없이 저장(레거시 행 시뮬레이션)
+    search_cache.set("무선 이어폰", RESULT)
+    search_cache.set("생수", RESULT)
+    search_cache.get("생수")
 
-    match = search_cache.find_similar([1.0, 0.0])
-
-    assert match is None
-
-
-def test_find_similar_returns_none_on_empty_cache(tmp_path, monkeypatch):
-    monkeypatch.setattr(search_cache, "DB_PATH", tmp_path / "cache.db")
-
-    assert search_cache.find_similar([1.0, 0.0]) is None
-
-
-def test_set_without_embedding_preserves_existing_embedding(tmp_path, monkeypatch):
-    monkeypatch.setattr(search_cache, "DB_PATH", tmp_path / "cache.db")
-    search_cache.set("무선 이어폰", RESULT, embedding=[1.0, 0.0])
-
-    search_cache.set("무선 이어폰", RESULT, embedding=None)  # refresh()가 embedding 없이 호출하는 경우
-
-    match = search_cache.find_similar([1.0, 0.0])
-    assert match is not None
-
-
-def test_set_stores_embedding_on_new_insert(tmp_path, monkeypatch):
-    monkeypatch.setattr(search_cache, "DB_PATH", tmp_path / "cache.db")
-    search_cache.set("무선 이어폰", RESULT, embedding=[1.0, 0.0])
-
-    conn = sqlite3.connect(tmp_path / "cache.db")
-    embedding_json = conn.execute(
-        "SELECT embedding FROM search_cache WHERE query_key = ?", ("무선 이어폰",)
-    ).fetchone()[0]
-    assert embedding_json == "[1.0, 0.0]"
-
-
-def test_connect_migrates_legacy_schema_without_embedding_column(tmp_path, monkeypatch):
-    db_path = tmp_path / "legacy.db"
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        """
-        CREATE TABLE search_cache (
-            query_key TEXT PRIMARY KEY,
-            results_json TEXT NOT NULL,
-            created_at REAL NOT NULL,
-            hits INTEGER NOT NULL DEFAULT 0
-        )
-        """
-    )
-    conn.commit()
-    conn.close()
-    monkeypatch.setattr(search_cache, "DB_PATH", db_path)
-
-    search_cache.get("아무 질의")  # _connect()를 트리거 — 예외 없이 마이그레이션돼야 함
-
-    conn = sqlite3.connect(db_path)
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(search_cache)")}
-    assert "embedding" in columns
+    assert search_cache.top_queries(limit=10, min_hits=1) == ["생수"]

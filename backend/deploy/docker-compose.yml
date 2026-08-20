@@ -8,8 +8,3 @@ services:
       - ../.env
     ports:
       - "127.0.0.1:8000:8000"
-    volumes:
-      # GOOGLE_SERVICE_ACCOUNT_FILE을 쓰는 경우, .env에 적은 경로가 컨테이너 안에서도
-      # 그대로 보이도록 이 디렉토리에 키 파일을 두고 .env에는
-      # /secrets/service-account.json 같은 컨테이너 내부 경로를 적어준다.
-      - ./secrets:/secrets:ro

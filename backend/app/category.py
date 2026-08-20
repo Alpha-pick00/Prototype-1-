@@ -101,12 +101,26 @@ async def classify_category(query: str, search_results: list[SearchResult]) -> C
     호출부는 이를 '분류 불확실 → 기존처럼 전 축 유지'로 안전하게 처리한다
     (용량/수량을 잘못 숨기는 것보다 안 물어볼 걸 한 번 더 묻는 게 낫다)."""
     try:
-        # max_retries=0 - embeddings.py와 동일한 이유(사용자 요청, 2026-08-15:
-        # "너무 느려 더 빠르게"). 실패해도 호출부가 이미 폴백(분류 불확실 처리)을
-        # 갖고 있어 SDK 재시도로 얻는 이득보다 지연 비용이 크다.
+        # max_retries=0 - 사용자 요청(2026-08-15: "너무 느려 더 빠르게"). 실패해도
+        # 호출부가 이미 폴백(분류 불확실 처리)을 갖고 있어 SDK 재시도로 얻는
+        # 이득보다 지연 비용이 크다.
+        #
+        # 토큰 절약(2026-08-19) - groq_model(120b)이 아니라 groq_refine_model(20b)을
+        # 쓴다. 이 함수는 검색마다(스타일 가이드 카테고리 게이트 때문에) 무조건
+        # 한 번씩 불리는데, groq_model(120b)은 이미 propose의 groq 슬롯 + judge +
+        # style_guide까지 몰려있어 이 계정의 Groq 일일 한도(모델당 200,000 토큰)를
+        # 가장 먼저 소진하는 모델이었다(실측 2026-08-19: 120b가 199,917/200,000
+        # 소진된 채로 429). 반면 refine 전용이던 20b는 매 요청 1건뿐이라 여유가
+        # 크다. 카테고리 분류(16개 중 하나 + 불리언 하나 고르기)는 반드시 120b급
+        # 추론이 필요한 작업이 아니라고 판단해 옮긴다 - 예전에 propose+분류+OCR을
+        # *한꺼번에* 20b로 몰았다가 20b가 오히려 더 빨리 고갈된 적이 있었지만
+        # (config.py 주석 참고), 그건 세 가지를 한 번에 옮긴 결과였고 여기서는
+        # 분류 하나만 옮겨 20b·120b 두 예산에 걸리는 부하를 좀 더 고르게 나눈다.
+        # 실패해도 categoy=None으로 안전하게 처리되니(위 docstring), 분류 품질이
+        # 이 모델에서 떨어지더라도 파이프라인이 깨지지는 않는다.
         client = AsyncOpenAI(api_key=settings.groq_api_key, base_url=settings.groq_api_base, max_retries=0)
         response = await client.chat.completions.create(
-            model=settings.groq_model,
+            model=settings.groq_refine_model,
             messages=[{"role": "user", "content": build_classify_prompt(query, search_results)}],
         )
         data = parse_json_object(response.choices[0].message.content or "")

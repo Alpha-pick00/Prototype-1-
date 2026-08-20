@@ -434,6 +434,31 @@ def _urls_to_extract(candidates: list[dict]) -> list[str]:
     return [c["url"] for c in candidates[:_MAX_EXTRACT_CANDIDATES] if c.get("url")]
 
 
+def _urls_needing_challenge_extract(candidates: list[dict]) -> list[str]:
+    """Tavily extract() 결과가 실제로 challenge 판정에 쓰이는 URL만 남긴다
+    (2026-08-20, 성능/비용 점검 - "다나와 후보 extract() 낭비 없애줘").
+
+    _apply_challenge()는 proposed_by에 "danawa"가 있는 후보(_DanawaFetchNode의
+    실측 픽과 병합된 후보)는 challenge 검증 결과를 아예 안 본다 - verified를
+    무조건 True로 강제하고, refreshed_price_krw도 절대 안 쓴다(다나와 자체
+    스크래핑 가격이 텍스트 재추출보다 정확하다고 보기 때문). 그 URL의 extract()
+    결과는 challenge 프롬프트에 실리기만 하고 최종적으로 어디에도 반영되지
+    않으므로, 애초에 Tavily에 요청할 필요가 없다.
+
+    URL 도메인(danawa.com 여부)이 아니라 proposed_by로 판단하는 이유 - 검색
+    자체가 danawa.com 하나로 한정돼 있어(app.search.RETAILER_DOMAINS) propose
+    에이전트(Qwen/Groq/DeepSeek)가 스니펫만 보고 독자적으로 고른 후보도 URL은
+    거의 항상 danawa.com이다. 그런 후보는 _DanawaFetchNode의 픽과 병합되지
+    않았다면(proposed_by에 "danawa"가 없다면) challenge 검증이 그대로
+    쓰이므로, 도메인 기준으로 걸렀다면 진짜 필요한 재조회까지 함께 잘려나갔을
+    것이다."""
+    return [
+        c["url"]
+        for c in candidates[:_MAX_EXTRACT_CANDIDATES]
+        if c.get("url") and "danawa" not in (c.get("proposed_by") or [])
+    ]
+
+
 def _is_danawa_product_url(url: str | None) -> bool:
     return bool(url) and urlsplit(url).netloc.lower().endswith("danawa.com")
 
@@ -452,11 +477,20 @@ class _ExtractPagesNode(BaseAgent):
     되어있는것도 뜨거든... 가격 비교가 중지된 상품이라고 뜨는 이런 경우의 수도
     없애주면"). Tavily extract 텍스트만으로 challenge LLM이 이 패턴을 매번
     알아채리라 보장할 수 없어서, _is_expired_page()로 이미 검증된 판별을
-    LLM 판단에 맡기지 않고 여기서 결정적으로 걸러낸다."""
+    LLM 판단에 맡기지 않고 여기서 결정적으로 걸러낸다.
+
+    Tavily extract()는 _urls_needing_challenge_extract()로 거른 URL에만 친다
+    (2026-08-20) - proposed_by에 "danawa"가 있는 후보는 _apply_challenge가
+    challenge 검증 결과를 아예 안 쓰므로(다나와 자체 스크래핑 가격을 그대로
+    신뢰), 그 URL까지 재조회하는 건 순수 낭비였다. 만료 여부 확인
+    (_check_expired)은 이 구분과 무관하게 danawa.com 도메인이면 전부 그대로
+    돌린다 - "가격비교 중지" 여부는 challenge 검증과 별개로 모든 다나와 후보에
+    똑같이 적용돼야 하는 사실 확인이라 대상을 줄이면 안 된다."""
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         candidates: list[dict] = ctx.session.state.get("candidates") or []
         urls = _urls_to_extract(candidates)
+        extract_urls = _urls_needing_challenge_extract(candidates)
         danawa_urls = [u for u in urls if _is_danawa_product_url(u)]
 
         async def _safe_extract(url: str) -> tuple[str, str | None]:
@@ -478,7 +512,7 @@ class _ExtractPagesNode(BaseAgent):
         expired_urls: list[str] = []
         if urls:
             extracted, expiry_checked = await asyncio.gather(
-                asyncio.gather(*(_safe_extract(u) for u in urls)),
+                asyncio.gather(*(_safe_extract(u) for u in extract_urls)),
                 asyncio.gather(*(_check_expired(u) for u in danawa_urls)),
             )
             pages = {url: text for url, text in extracted if text}
@@ -674,8 +708,8 @@ def _groq_model(model_name: str) -> LiteLlm:
     """Groq는 OpenAI 호환 엔드포인트라 "openai/" 프리픽스 뒤에 api_base/api_key로
     Groq 엔드포인트를 직접 지정한다 - litellm이 groq 프로바이더를 자체 지원하는지에
     기대지 않고 "그냥 OpenAI 호환 엔드포인트"로 취급하는 쪽이 확실하다(agents/gpt.py의
-    DashScope 처리와 동일한 접근). num_retries=0 - embeddings.py와 동일한 이유
-    (사용자 요청, 2026-08-15: "너무 느려 더 빠르게"): 실패해도 각 단계마다 이미
+    DashScope 처리와 동일한 접근). num_retries=0 - 사용자 요청(2026-08-15: "너무
+    느려 더 빠르게"): 실패해도 각 단계마다 이미
     폴백(on_model_error_callback 등)이 있어 litellm 내부 재시도로 얻는 이득보다
     지연 비용이 크다."""
     return LiteLlm(
@@ -1214,10 +1248,15 @@ async def run_stream(query: str, skip_clarify: bool = False) -> AsyncIterator[di
                 search_results = [
                     SearchResult(**r) for r in event.actions.state_delta.get("search_results") or []
                 ]
-                clarify = await _extract_clarify_options(query, search_results)
+                # skip_clarify=True면 아래 조건이 항상 거짓이라 clarify 결과를
+                # 쓰지 않는다 - 그런데도 호출 자체는 무조건 나가고 있었다.
+                # _extract_clarify_options는 브랜드별 최대 15개 병렬 DeepSeek
+                # 호출까지 갈 수 있는 무거운 함수라(debate.py 참고), 후속 라운드
+                # (skip_clarify=True)마다 결과를 100% 버리면서도 이 비용을 그대로
+                # 치르고 있었다 - 토큰 절약(2026-08-19)으로 아예 호출을 건너뛴다.
+                clarify = None if skip_clarify else await _extract_clarify_options(query, search_results)
                 if (
                     clarify is not None
-                    and not skip_clarify
                     and _is_ambiguous_facets(query, clarify.options.facets)
                 ):
                     await gen.aclose()

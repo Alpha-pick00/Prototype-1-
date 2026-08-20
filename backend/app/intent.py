@@ -106,14 +106,3 @@ def is_non_product_chitchat(query: str) -> bool:
     if len(tokens) > _CHITCHAT_TOKEN_LIMIT:
         return False
     return tokens[0] in _CHITCHAT_FIRST_TOKENS
-
-
-def has_count_spec(query: str) -> bool:
-    """질의에 이미 개수(1개/6병/2박스 등)가 명시돼 있는지 — Human-in-the-loop에서
-    사용자가 이미 답한 기준을 검색 결과가 완전히 못 걸러내도 다시 안 물어보기 위함."""
-    return bool(_COUNT_UNIT_PATTERN.search(query))
-
-
-def has_volume_spec(query: str) -> bool:
-    """질의에 이미 용량/무게(500ml/1kg 등)가 명시돼 있는지 — has_count_spec과 같은 이유."""
-    return bool(_VOLUME_UNIT_PATTERN.search(query))

@@ -189,9 +189,7 @@ export const Sidebar = () => {
       <div className="flex-1 min-h-0 overflow-y-auto">
         {/* 대화(conversations) 목록은 따로 안 보여준다(사용자 요청, 2026-08-15:
             "사이드바 열면 대화창이 새롭게 생겼는데 그냥 원래 있던 기록 창에
-            냅둬") - 멀티턴 대화 전환 기능(switchConversation) 자체는
-            SearchContext에 그대로 남아있지만, 사이드바 목록은 예전처럼 "기록"
-            하나로만 보여준다. */}
+            냅둬") - "기록" 하나로만 보여준다. */}
         <div className="mt-4 px-5">
           <span className="text-[11px] font-mono uppercase tracking-widest text-neutral-400">기록</span>
         </div>

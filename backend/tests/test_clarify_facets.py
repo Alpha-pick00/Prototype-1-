@@ -13,6 +13,8 @@ from app import decision_cache
 from app.debate import (
     _apply_category_breakdown,
     _category_breakdown_facet,
+    _enrich_facets_per_brand,
+    _MAX_BRAND_ENRICH_FANOUT,
     _select_category_group,
     _select_effective_category_name,
     _strip_query_answered_options,
@@ -1419,6 +1421,33 @@ def test_check_clarify_facets_enriches_minority_brand_series_via_per_brand_extra
     assert "아이폰17" in by_label["시리즈"].options
     assert by_label["시리즈"].options_by_selection is not None
     assert by_label["시리즈"].options_by_selection["APPLE"] == ["아이폰17"]
+
+
+def test_enrich_facets_per_brand_caps_parallel_llm_calls(monkeypatch):
+    """토큰 절약(2026-08-19) - 브랜드가 MAX_BRAND_OPTIONS(15)까지 있어도
+    _enrich_facets_per_brand는 상위 _MAX_BRAND_ENRICH_FANOUT개까지만 DeepSeek를
+    병렬 호출해야 한다(요청 한 번에 최대 15번 부르던 걸 상한을 둬 줄인 회귀
+    테스트)."""
+    many_brands = [f"브랜드{i}" for i in range(10)]
+    assert len(many_brands) > _MAX_BRAND_ENRICH_FANOUT
+
+    facets = [
+        ClarifyFacet(label="브랜드", options=many_brands),
+        ClarifyFacet(label="시리즈", options=["시리즈A"]),
+    ]
+    names = [f"{b} 상품" for b in many_brands]
+
+    calls: list[str] = []
+
+    async def _fake_extract_facets(query, names, required_labels=None):
+        calls.append(names[0] if names else "")
+        return []
+
+    monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
+
+    asyncio.run(_enrich_facets_per_brand(facets, names, "질의"))
+
+    assert len(calls) == _MAX_BRAND_ENRICH_FANOUT
 
 
 def test_check_clarify_facets_enriches_minority_ecosystem_device_models_via_ecosystem_extraction(monkeypatch):
