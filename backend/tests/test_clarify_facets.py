@@ -15,7 +15,6 @@ from app.debate import (
     _enrich_facets_per_brand,
     _MAX_BRAND_ENRICH_FANOUT,
     _select_category_group,
-    _select_effective_category_name,
     _strip_query_answered_options,
     check_clarify_facets,
     run_elevenst_only_debate_stream,
@@ -864,20 +863,6 @@ def test_select_category_group_prefers_longest_match_on_overlap():
     assert top["name"] == "태블릿/휴대폰"
 
 
-def test_select_effective_category_name_returns_subcategory_when_drilled_down():
-    name = _select_effective_category_name("샤오미 태블릿/휴대폰 휴대폰", _XIAOMI_CATEGORIES)
-    assert name == "휴대폰"
-
-
-def test_select_effective_category_name_returns_top_level_when_only_top_chosen():
-    name = _select_effective_category_name("샤오미 태블릿/휴대폰", _XIAOMI_CATEGORIES)
-    assert name == "태블릿/휴대폰"
-
-
-def test_select_effective_category_name_none_when_nothing_chosen():
-    assert _select_effective_category_name("샤오미", _XIAOMI_CATEGORIES) is None
-
-
 def test_category_breakdown_facet_uses_top_level_groups_by_default():
     facet = _category_breakdown_facet("샤오미", _XIAOMI_CATEGORIES)
     assert facet.label == "카테고리"
@@ -946,43 +931,34 @@ def test_check_clarify_facets_injects_real_category_facet_when_sample_misses_it(
     assert "태블릿/휴대폰" in by_label["카테고리"].options
 
 
-def test_check_clarify_facets_rescopes_sample_when_category_already_selected(monkeypatch):
-    """카테고리를 이미 골랐으면(질의에 그 이름이 있으면) 브랜드 전체 표본이
-    아니라 그 카테고리로 좁힌 실제 표본으로 나머지 facet(모델 등)을 뽑아야
-    한다 - 안 그러면 "공기청정기" 카테고리를 골랐는데 "모델" facet에 전혀
-    다른 카테고리 상품(예: "미 패드5")이 섞여 나온다."""
-    brand_wide_items = [{"pcode": "1", "product_name": "샤오미 미지아 선풍기", "total_mall_count": None}]
-    phone_items = [
-        {"pcode": "2", "product_name": "샤오미 포코 X8 프로 256GB", "total_mall_count": None},
-        {"pcode": "3", "product_name": "샤오미 15T 프로 512GB", "total_mall_count": None},
-        {"pcode": "4", "product_name": "샤오미 레드미 노트14 프로 256GB", "total_mall_count": None},
-    ]
+def test_check_clarify_facets_does_not_research_when_category_already_selected(monkeypatch):
+    """HITL 구조적 필터 재설계(2026-08-20, "텍스트 재검색 말고 다른 방식으로") -
+    카테고리를 이미 골랐어도(질의에 그 이름이 있어도) 그 이름을 검색어에
+    덧붙여 11번가를 다시 검색하지 않는다(11번가는 카테고리 코드 필터를
+    지원하지 않고, 카테고리 이름은 상품명 텍스트에 거의 등장하지 않아
+    구조적 필터도 통하지 않는다) - 검색은 base_query로 한 번만 나가야
+    한다."""
+    seen_queries: list[str] = []
 
-    async def _fake_search_danawa(query, limit=90):
-        if query == "샤오미 휴대폰":
-            return phone_items
-        return brand_wide_items
+    async def _fake_search(query, limit=90):
+        seen_queries.append(query)
+        return [{"pcode": "1", "product_name": "샤오미 미지아 선풍기", "total_mall_count": None}]
 
-    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search_danawa)
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
 
-    async def _fake_search_danawa_categories(query):
+    async def _fake_search_categories(query):
         return _XIAOMI_CATEGORIES
 
-    monkeypatch.setattr("fetchers.elevenst.search_categories", _fake_search_danawa_categories)
+    monkeypatch.setattr("fetchers.elevenst.search_categories", _fake_search_categories)
 
     async def _fake_extract_facets(query, names):
         return [ClarifyFacet(label="모델", options=names)]
 
     monkeypatch.setattr("app.agents.deepseek.extract_facets_from_names", _fake_extract_facets)
 
-    result = asyncio.run(check_clarify_facets("샤오미 태블릿/휴대폰 휴대폰", base_query="샤오미"))
+    asyncio.run(check_clarify_facets("샤오미 태블릿/휴대폰 휴대폰", base_query="샤오미"))
 
-    by_label = {f.label: f for f in result.options.facets}
-    assert by_label["모델"].options == [
-        "샤오미 포코 X8 프로 256GB",
-        "샤오미 15T 프로 512GB",
-        "샤오미 레드미 노트14 프로 256GB",
-    ]
+    assert seen_queries == ["샤오미"]
 
 
 def test_extract_facets_from_names_returns_empty_on_no_product_names():

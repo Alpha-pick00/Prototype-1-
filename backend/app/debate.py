@@ -597,26 +597,19 @@ async def check_clarify_facets(
     # 비어있을 것이므로 굳이 다시 부르지 않는다.
     categories = await price_table_module._search_elevenst_categories(search_query) if items else []
 
-    effective_category = _select_effective_category_name(query, categories)
-    if effective_category:
-        # 카테고리를 이미 골랐으면(질의 텍스트에 그 이름이 있으면) 브랜드
-        # 전체 표본이 아니라 그 카테고리로 좁힌 실제 표본으로 나머지
-        # facet(모델/용량 등)을 뽑는다 - 안 그러면 브랜드 전체 표본에는
-        # 그 카테고리 상품이 아예 없을 수 있어(예: "샤오미" 상위 40개엔
-        # 휴대폰이 하나도 없다) "모델" 같은 축이 전혀 다른 카테고리 상품으로
-        # 채워진다. 이렇게 표본 자체를 카테고리로 좁혀두면, 그 안에서 다시
-        # 계산되는 _attach_facet_crossfilter가 "모델을 고르면 용량도 그에
-        # 맞게 좁혀지는" 것까지 자연히 따라온다 - 표본이 이미 그 카테고리
-        # 상품뿐이라 별도 로직이 필요 없다. 11번가 오픈 API는 dispCtgrNo를
-        # ProductSearch에 넘겨도 서버 쪽에서 실제로 필터링해주지 않는다(실측
-        # 확인 - TotalCount가 무시하고 그대로 나옴), 그래서 다나와와 같은
-        # 방식으로 카테고리 이름을 검색어에 텍스트로 덧붙여 재검색한다.
-        category_items = await price_table_module._search_elevenst_items(
-            f"{search_query} {effective_category}", limit=price_table_module.CLARIFY_SEARCH_LIMIT
-        )
-        if len(category_items) >= MIN_FILTERED_CLARIFY_ITEMS:
-            items = category_items
-
+    # 카테고리 축은 텍스트 재검색을 쓰지 않는다(2026-08-20 재설계, "텍스트
+    # 재검색 말고 다른 방식으로") - 11번가 오픈 API는 dispCtgrNo를
+    # ProductSearch에 넘겨도 서버 쪽에서 실제로 필터링해주지 않고(실측 확인 -
+    # TotalCount가 무시하고 그대로 나옴), 카테고리 이름("과자/간식" 등)은
+    # 다나와의 대분류/중분류와 달리 상품명 텍스트에 거의 등장하지 않아
+    # _filter_items_by_extra_terms 같은 순수 로컬 필터링도 통하지 않는다.
+    # 그래서 카테고리 facet은 실측 breakdown(categories, 아래
+    # _apply_category_breakdown)으로 정확하게 "보여주기"만 하고, 사용자가
+    # 골라도 표본을 카테고리로 좁히려 하지 않는다 - 브랜드/모델/용량처럼
+    # 값이 상품명에 실제로 등장하는 다른 축들이 아래 _filter_items_by_extra_terms로
+    # 표본을 구조적으로 좁혀 나간다(브랜드 -> 모델 -> 용량 순으로 자연스럽게
+    # 이어지는 게 그 예 - 순서 자체는 _facet_sort_key가 매 라운드 표본
+    # 기준으로 동적으로 정한다).
     if base_query and base_query.strip() and base_query.strip() != query.strip():
         items = _filter_items_by_extra_terms(items, query, base_query)
     names = [item["product_name"] for item in items]
@@ -643,26 +636,6 @@ def _select_category_group(
     if not matched:
         return None
     return max(matched, key=lambda g: len(g["name"]))
-
-
-def _select_effective_category_name(
-    query: str, categories: list[elevenst.ElevenstCategoryGroup]
-) -> str | None:
-    """이미 고른 카테고리 중 가장 구체적인(중분류 > 대분류) 이름을 돌려준다 -
-    대분류/중분류 둘 다 같은 다나와 응답에 이미 들어있어(parse_category_breakdown)
-    추가 조회 없이 판단 가능하다. 이 이름을 브랜드 질의에 붙여 다나와를 다시
-    검색하면(check_clarify_facets) "모델"/"용량" 등 나머지 facet이 그
-    카테고리에 실제로 속하는 상품만으로 뽑힌다."""
-    top = _select_category_group(query, categories)
-    if top is None:
-        return None
-    # top["name"] 자체가 우연히 자기 중분류 이름을 부분 문자열로 포함할 수
-    # 있다(예: 대분류 "태블릿/휴대폰"은 중분류 "휴대폰"을 이미 포함한다) - 그
-    # 부분을 지우고 나머지에서만 중분류를 찾아야, 대분류만 고른 상태(아직
-    # 중분류는 안 고름)를 중분류까지 고른 것으로 착각하지 않는다.
-    remainder = query.casefold().replace(top["name"].casefold(), "", 1)
-    sub = _select_category_group(remainder, top["subcategories"])
-    return sub["name"] if sub is not None else top["name"]
 
 
 def _category_breakdown_facet(
