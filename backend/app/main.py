@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import TypeAdapter
 
-from . import autocomplete, danawa, decision_cache, history, popularity_scheduler, preferences
+from . import autocomplete, danawa, history, popularity_scheduler, preferences
 from .agents import gpt as gpt_agent
 from .auth import google as google_auth
 from .auth import kakao as kakao_auth
@@ -23,10 +23,8 @@ from .debate import (
     run_brand_price,
     run_danawa_only_debate,
     run_danawa_only_debate_stream,
-    run_debate,
-    run_debate_stream,
-    run_single_debate,
-    run_single_debate_stream,
+    run_elevenst_only_debate,
+    run_elevenst_only_debate_stream,
 )
 from .ocr import cleanup as ocr_cleanup
 from .ocr import google_vision as google_vision_ocr
@@ -267,18 +265,16 @@ async def ocr_extract(image: UploadFile) -> OcrExtractResponse:
 
 @app.post("/decide", response_model=DecideResult)
 async def decide(request: DecideRequest, background_tasks: BackgroundTasks) -> DecideResult:
-    skip_resolve = False
     try:
         if request.brand:
             result = await run_brand_price(request.query, request.brand)
-        elif request.skip_intent_check:
-            result = await run_single_debate(request.query, skip_clarify=True)
         else:
-            # 정적 최종결과 캐시(decision_cache) 히트면 이미 캡처 시점에 한 번
-            # resolve_lowest_price를 거친 링크라 - 다시 부르면 다나와에 실시간
-            # 네트워크 호출(~0.5초)이 또 나가 캐시의 속도 이점이 사라진다.
-            skip_resolve = decision_cache.lookup(request.query) is not None
-            result = await run_debate(request.query)
+            # 메인 검색 흐름(2026-08-20, "다나와껀 빼고 11번가 API만 붙여줘") -
+            # 다나와 기반 멀티에이전트 파이프라인(run_debate/run_single_debate)
+            # 대신 11번가 오픈 API 전용 경로(run_elevenst_only_debate)를 쓴다.
+            # LLM 미사용이라 skip_intent_check(재질문 스킵) 구분 자체가 무의미해
+            # 두 분기를 하나로 합쳤다 - 이 경로엔 애초에 되묻기(clarify)가 없다.
+            result = await run_elevenst_only_debate(request.query)
     except (RuntimeError, ValueError) as exc:
         # RuntimeError: 제안 전부 실패, ValueError: judge 응답에서 JSON을 못 찾음
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -288,8 +284,7 @@ async def decide(request: DecideRequest, background_tasks: BackgroundTasks) -> D
             status_code=502, detail="구매 결정을 처리하는 중 오류가 발생했습니다."
         ) from exc
 
-    if not skip_resolve:
-        result = await _resolve_danawa_urls(result)
+    result = await _resolve_danawa_urls(result)
     background_tasks.add_task(autocomplete.record_terms, _autocomplete_terms(request, result))
     return result
 
@@ -310,18 +305,15 @@ async def decide_stream(request: DecideRequest) -> StreamingResponse:
                 yield json.dumps({"type": "final", "result": result.model_dump()}) + "\n"
             else:
                 result = None
-                # decide()와 같은 이유(skip_resolve 주석 참고) - decision_cache
-                # 히트는 링크를 다시 해석하지 않는다.
-                skip_resolve = not request.skip_intent_check and decision_cache.lookup(request.query) is not None
-                stream = (
-                    run_single_debate_stream(request.query, skip_clarify=True)
-                    if request.skip_intent_check
-                    else run_debate_stream(request.query)
-                )
-                async for event in stream:
+                # 메인 검색 흐름(2026-08-20, "다나와껀 빼고 11번가 API만
+                # 붙여줘") - decide()와 같은 이유로 run_debate_stream/
+                # run_single_debate_stream 대신 run_elevenst_only_debate_stream을
+                # 쓴다(위 decide() 주석 참고 - clarify 개념이 없어 skip_intent_check
+                # 분기도 함께 없앴다).
+                async for event in run_elevenst_only_debate_stream(request.query):
                     if event["type"] == "final":
                         parsed = _decide_result_adapter.validate_python(event["result"])
-                        result = parsed if skip_resolve else await _resolve_danawa_urls(parsed)
+                        result = await _resolve_danawa_urls(parsed)
                         event["result"] = result.model_dump()
                     yield json.dumps(event) + "\n"
         except (RuntimeError, ValueError) as exc:
@@ -403,3 +395,19 @@ async def decide_danawa_only_stream(request: DecideRequest) -> StreamingResponse
             yield f"data: {json.dumps(error_event, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(_events(), media_type="text/event-stream")
+
+
+@app.post("/decide/elevenst-only", response_model=DecideResponse)
+async def decide_elevenst_only(request: DecideRequest) -> DecideResponse:
+    """임시 실험 엔드포인트(2026-08-20) - /decide/danawa-only와 같은 원칙
+    (LLM 호출 0번, 구조화 데이터만으로 규칙 기반 추천)이지만 소스가 다나와가
+    아니라 11번가 오픈 API(ProductSearch)다. 프론트엔드는 아직 이 경로를
+    쓰지 않는다 - 로컬 실험/검증 전용."""
+    try:
+        return await run_elevenst_only_debate(request.query)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail="11번가 전용 처리 중 오류가 발생했습니다."
+        ) from exc

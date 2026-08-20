@@ -6,7 +6,7 @@ from pydantic import BaseModel
 # 선택 대상 풀에 직접 들어간다. 프론트엔드는 AGENT_LABEL[agent] || agent로
 # 렌더링해(frontend/src/app/components/SearchResults.tsx) 모르는 값이 와도
 # 원문 그대로 표시할 뿐 깨지지 않는다 - 확인 후 추가했다.
-AgentName = Literal["gpt", "groq", "deepseek", "danawa"]
+AgentName = Literal["gpt", "groq", "deepseek", "danawa", "elevenst"]
 AuthProvider = Literal["google", "kakao", "naver"]
 
 
@@ -69,8 +69,10 @@ class Decision(BaseModel):
     chosen_agent: AgentName
     # "danawa_offer": app.price_table이 다나와 실측 가격표의 A등급(링크 생성
     # 가능) offer와 대조해 price/url을 검증된 값으로 교체했다는 뜻.
+    # "elevenst_offer": 11번가 오픈 API(ProductSearch) 응답을 그대로 썼다는 뜻 -
+    # 다나와처럼 이미 1st-party 구조화 데이터라 LLM 추정이 섞이지 않는다.
     # "llm_guess"(기본값): 그런 대조 없이 LLM이 제안한 값 그대로.
-    price_source: Literal["danawa_offer", "llm_guess"] = "llm_guess"
+    price_source: Literal["danawa_offer", "elevenst_offer", "llm_guess"] = "llm_guess"
     # 최종 선택된 후보가 DeepSeek challenge 검증을 통과했는지(Proposal.verified와
     # 같은 의미) — judge 경로는 매칭된 proposal의 값을 그대로 물려받고, relaxed
     # fallback 경로(2026-08-16 강화)는 별도로 challenge를 태워 채운다. None은

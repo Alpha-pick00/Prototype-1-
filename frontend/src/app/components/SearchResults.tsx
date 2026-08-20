@@ -26,6 +26,8 @@ const AGENT_LABEL: Record<string, string> = {
   gpt: 'Qwen',
   groq: 'Groq',
   deepseek: 'DeepSeek',
+  danawa: '다나와',
+  elevenst: '11번가',
 };
 
 const Card = ({ children }: { children: React.ReactNode }) => (

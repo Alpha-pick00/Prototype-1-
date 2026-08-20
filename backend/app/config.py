@@ -18,6 +18,9 @@ class Settings:
     )
     deepseek_api_key: str | None = os.environ.get("DEEPSEEK_API_KEY")
     tavily_api_key: str | None = os.environ.get("TAVILY_API_KEY")
+    # 11번가 오픈 API(openapi.11st.co.kr) 키 - 아직 어디서도 안 쓰인다(등록만
+    # 해둠, 2026-08-20). 검색 도메인을 다나와 외로 확장할 때 쓸 수 있다.
+    elevenst_api_key: str | None = os.environ.get("ELEVENST_API_KEY")
 
     # 2026-08-18("qwen 3.7 + 로 모델 바꿔줘") - qwen-max에서 Qwen3.7 세대의
     # plus 등급으로 교체. 필요하면 .env의 QWEN_MODEL로 다른 버전(예:

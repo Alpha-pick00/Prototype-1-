@@ -3,7 +3,7 @@ import logging
 import re
 from typing import Any, AsyncIterator
 
-from fetchers import danawa, danawa_search
+from fetchers import danawa, danawa_search, elevenst
 
 from . import adk_pipeline
 from . import decision_cache
@@ -26,6 +26,7 @@ from .schemas import (
     Decision,
     DecideResponse,
     PriceRange,
+    Proposal,
     SearchResult,
 )
 
@@ -299,6 +300,63 @@ async def _finalize_danawa_only(
     decision = await price_table_module.exclude_price_comparison_site_as_final_pick(decision, [], danawa_tables)
 
     return DecideResponse(query=original_query or query, proposals=[], decision=decision, price_table=table)
+
+
+async def run_elevenst_only_debate(query: str) -> DecideResponse:
+    """다나와가 아니라 11번가 오픈 API(ProductSearch)만으로 검색하는 실험
+    경로(2026-08-20, "다나와 리서치 말고 11번가 API만 사용해서 검색하는걸로
+    바꿔서 한번 띄워줘봐") - run_danawa_only_debate()와 같은 "LLM 미사용,
+    구조화 데이터만" 원칙을 따르지만 소스가 완전히 다르다(스크래핑이 아니라
+    11번가 1st-party API).
+
+    _DanawaFetchNode가 pick_primary()에 관련성 가드 없이 썼다가 무관한 상품이
+    골라진 회귀(adk_pipeline.py 주석 참고)를 반복하지 않기 위해, 여기서도
+    검색 결과 각각에 _product_name_matches(query, product_name)를 적용해
+    질의와 실제로 맞는 상품만 후보로 남긴 뒤 그중 최저가를 고른다 - API
+    자체의 정렬(sortCd=A)이 실측상 항상 가격 오름차순은 아니었어서
+    (2026-08-20 실측: 정렬 안 됨 확인) 클라이언트에서 직접 최저가를 고른다."""
+    items = await elevenst.search_elevenst(query, limit=10)
+    relevant = [it for it in items if price_table_module._product_name_matches(query, it["product_name"])]
+    if not relevant:
+        raise RuntimeError(f"11번가에서 '{query}'에 대해 관련성 있는 상품을 찾지 못했다.")
+
+    best = min(relevant, key=lambda it: it["price_krw"])
+    decision = Decision(
+        product_name=best["product_name"],
+        price=f"{best['price_krw']:,}원",
+        retailer=best["seller"],
+        url=best["url"],
+        reasoning="11번가 오픈 API(ProductSearch) 실측 - LLM 미사용, 구조화 데이터 기반 최저가 선택",
+        chosen_agent="elevenst",
+        price_source="elevenst_offer",
+    )
+    proposals = [
+        Proposal(
+            agent="elevenst",
+            product_name=it["product_name"],
+            price=f"{it['price_krw']:,}원",
+            retailer=it["seller"],
+            url=it["url"],
+            reasoning="11번가 오픈 API 검색 결과",
+            verified=True,
+        )
+        for it in relevant
+    ]
+    return DecideResponse(query=query, proposals=proposals, decision=decision)
+
+
+async def run_elevenst_only_debate_stream(query: str) -> AsyncIterator[dict[str, Any]]:
+    """run_elevenst_only_debate()의 스트리밍 버전(2026-08-20) - "다나와껀 빼고
+    11번가 API만 붙여줘" 요청으로 메인 검색 흐름(/decide/stream)이 이 경로를
+    타게 됐다. run_debate_stream()과 이벤트 모양을 맞춰야 프론트가 그대로
+    재사용된다 - status 이벤트 하나(진행 표시용) 후 final 이벤트 하나."""
+    yield {"type": "status", "stage": "searching"}
+    try:
+        result = await run_elevenst_only_debate(query)
+    except RuntimeError as exc:
+        yield {"type": "error", "message": str(exc)}
+        return
+    yield {"type": "final", "result": result.model_dump()}
 
 
 # check_clarify_facets()의 base_query 재사용 필터링 전용(사용자 요청, 2026-08-13:

@@ -883,31 +883,6 @@ def test_decide_danawa_only_endpoint_returns_200_with_no_proposals(monkeypatch):
     assert data["decision"]["chosen_agent"] == "danawa"
 
 
-def test_decide_auto_routes_to_danawa_only_when_no_llm_key_configured(monkeypatch):
-    # 일부러 gpt/groq/deepseek/judge를 mock하지 않는다 - 그 상태로도(=진짜로
-    # 안 불려야) 200이 나와야 라우팅이 제대로 됐다는 뜻이다. 잘못 라우팅되면
-    # mock 안 된 진짜 LLM 호출이 conftest의 네트워크 차단에 걸려 502가 난다.
-    monkeypatch.setattr("app.debate._any_llm_key_configured", lambda: False)
-    monkeypatch.setattr("app.autocomplete.record_terms", lambda terms: None)
-    _patch_direct_danawa_search(monkeypatch, "1")
-
-    html = _danawa_html("테스트 상품", [_offer_li("옥션", "10,000", "EE715")])
-
-    async def _fake_fetch(url):
-        return parse_danawa_html(url, html)
-
-    monkeypatch.setattr("fetchers.danawa.fetch_danawa_offers", _fake_fetch)
-
-    # 메인 /decide 엔드포인트로 쐈는데도(=/decide/danawa-only가 아니다) LLM 키가
-    # 없으면 자동으로 다나와 전용 경로를 타야 한다.
-    resp = client.post("/decide", json={"query": "테스트 상품"})
-
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["proposals"] == []
-    assert data["decision"]["chosen_agent"] == "danawa"
-
-
 # -- run_danawa_only_debate: 변형(같은 상품) vs 애매모호(다른 상품) 분기 -------------
 
 
