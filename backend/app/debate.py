@@ -43,14 +43,31 @@ async def _rank_by_relevance(
     return [it for it, _ in scored]
 
 
-async def run_elevenst_only_debate(query: str) -> DecideResponse:
-    """11번가 오픈 API(ProductSearch)로 검색한다. _product_name_matches로
-    질의와 실제로 맞는 상품만 후보(검증된 후보군)로 남기고, Qwen 임베딩으로
-    관련도순 정렬한 뒤(_rank_by_relevance) 그 순서 그대로 proposals에 담아
-    "관련 상품" 목록으로 노출한다. 최종 추천은 추천 Agent(gpt.recommend_best,
-    가격뿐 아니라 리뷰·구매만족도까지 고려)가 고르고, 실패하면(키 없음·API
-    오류) 최저가 규칙 기반으로 폴백한다."""
-    items = await elevenst.search_elevenst(query, limit=10)
+async def _search_candidates(query: str, base_query: str | None) -> list[elevenst.ElevenstSearchItem]:
+    """HITL 드릴다운(2026-08-20 재설계, "쿼리 재구성해서 검색하는 거나
+    다름없다" 지적) - base_query가 없으면(단발 질의) 그 질의로 좁게(10개)
+    검색해 끝낸다. base_query가 있으면(AI 상세검색을 거쳐 facet을 answer로
+    덧붙인 드릴다운 질의) 매번 새로 조합된 전체 문자열로 재검색하지 않는다 -
+    check_clarify_facets와 똑같이 안정적인 base_query로 넓게(90개) 검색한
+    뒤, 그 위에 사용자가 덧붙인 답(facet 값들)을 _filter_items_by_extra_terms로
+    구조적으로(순수 로컬 필터링, 추가 네트워크 요청 없음) 좁힌다 - 매 라운드
+    새 문자열을 만들어 11번가를 다시 때리는 대신, 검증된 후보군 자체를
+    필터링해 나간다."""
+    if base_query and base_query.strip() and base_query.strip() != query.strip():
+        items = await elevenst.search_elevenst(base_query, limit=price_table_module.CLARIFY_SEARCH_LIMIT)
+        return _filter_items_by_extra_terms(items, query, base_query)
+    return await elevenst.search_elevenst(query, limit=10)
+
+
+async def run_elevenst_only_debate(query: str, base_query: str | None = None) -> DecideResponse:
+    """11번가 오픈 API(ProductSearch)로 검색한다(_search_candidates - base_query가
+    있으면 재검색 대신 구조적 필터링). _product_name_matches로 질의와 실제로
+    맞는 상품만 후보(검증된 후보군)로 남기고, Qwen 임베딩으로 관련도순
+    정렬한 뒤(_rank_by_relevance) 그 순서 그대로 proposals에 담아 "관련 상품"
+    목록으로 노출한다. 최종 추천은 추천 Agent(gpt.recommend_best, 가격뿐
+    아니라 리뷰·구매만족도까지 고려)가 고르고, 실패하면(키 없음·API 오류)
+    최저가 규칙 기반으로 폴백한다."""
+    items = await _search_candidates(query, base_query)
     relevant = [it for it in items if price_table_module._product_name_matches(query, it["product_name"])]
     if not relevant:
         raise RuntimeError(f"11번가에서 '{query}'에 대해 관련성 있는 상품을 찾지 못했다.")
@@ -94,13 +111,15 @@ async def run_elevenst_only_debate(query: str) -> DecideResponse:
     return DecideResponse(query=query, proposals=proposals, decision=decision)
 
 
-async def run_elevenst_only_debate_stream(query: str) -> AsyncIterator[dict[str, Any]]:
+async def run_elevenst_only_debate_stream(
+    query: str, base_query: str | None = None
+) -> AsyncIterator[dict[str, Any]]:
     """run_elevenst_only_debate()의 스트리밍 버전 - 메인 검색 흐름
     (/decide/stream)이 이 경로를 쓴다. status 이벤트 하나(진행 표시용) 후
     final 이벤트 하나를 내보낸다."""
     yield {"type": "status", "stage": "searching"}
     try:
-        result = await run_elevenst_only_debate(query)
+        result = await run_elevenst_only_debate(query, base_query=base_query)
     except RuntimeError as exc:
         yield {"type": "error", "message": str(exc)}
         return

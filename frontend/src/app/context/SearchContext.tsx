@@ -325,7 +325,8 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
         },
         undefined,
         undefined,
-        skipIntentCheck
+        skipIntentCheck,
+        baseQuery
       );
 
       if (streamError || !finalResult) {

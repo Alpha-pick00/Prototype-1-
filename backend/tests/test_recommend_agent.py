@@ -21,6 +21,46 @@ def _item(name: str, price: int, code: str = "1") -> ElevenstSearchItem:
     )
 
 
+def test_search_candidates_searches_directly_when_no_base_query(monkeypatch):
+    seen = {}
+
+    async def _fake_search(query, limit=10):
+        seen["query"] = query
+        seen["limit"] = limit
+        return [_item("아무 상품", 1000, "1")]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+
+    items = asyncio.run(debate._search_candidates("초코파이", None))
+
+    assert seen == {"query": "초코파이", "limit": 10}
+    assert [it["product_code"] for it in items] == ["1"]
+
+
+def test_search_candidates_reuses_base_query_search_and_filters_structurally_when_drilled_down(monkeypatch):
+    """HITL 드릴다운 후속 턴(query != base_query)이면 재구성된 전체 문자열로
+    다시 검색하지 않고, base_query로 넓게 검색한 뒤 사용자가 덧붙인 답을
+    로컬 필터링(_filter_items_by_extra_terms)으로 구조적으로 좁혀야 한다."""
+    seen = {}
+
+    async def _fake_search(query, limit=10):
+        seen["query"] = query
+        seen["limit"] = limit
+        return [
+            _item("초코파이 오리온 바나나 468g", 3000, "1"),
+            _item("초코파이 오리온 정 39g", 1500, "2"),
+            _item("초코파이 오리온 말차 468g", 3200, "3"),
+            _item("초코파이 롯데 딸기 300g", 2000, "4"),
+        ]
+
+    monkeypatch.setattr("fetchers.elevenst.search_elevenst", _fake_search)
+
+    items = asyncio.run(debate._search_candidates("초코파이 오리온", "초코파이"))
+
+    assert seen == {"query": "초코파이", "limit": debate.price_table_module.CLARIFY_SEARCH_LIMIT}
+    assert [it["product_code"] for it in items] == ["1", "2", "3"]
+
+
 def test_rank_by_relevance_orders_by_cosine_similarity_when_embeddings_available(monkeypatch):
     items = [_item("무관한 상품", 1000, "1"), _item("정확히 찾는 상품", 2000, "2")]
 

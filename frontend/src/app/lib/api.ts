@@ -246,13 +246,20 @@ export type DecideStreamEvent =
   | { type: 'error'; message: string };
 
 /** /decide와 같은 일을 하지만, 서버가 단계별로 흘려보내는 NDJSON(줄바꿈으로 구분된 JSON)을
- * 그때그때 onEvent로 넘겨준다 — 세 에이전트를 다 기다리지 않고 먼저 끝난 제안부터 보여줄 수 있다. */
+ * 그때그때 onEvent로 넘겨준다 — 세 에이전트를 다 기다리지 않고 먼저 끝난 제안부터 보여줄 수 있다.
+ *
+ * baseQuery(2026-08-20, HITL 구조적 필터 재설계) - 드릴다운 후속 턴(예: "핸드폰"
+ * -> "핸드폰 삼성전자")이면 그 체인의 맨 처음 검색어를 실어 보낸다. 안 보내면
+ * 백엔드가 매번 재구성된 전체 문자열로 새로 검색한다 - 보내면 base_query로
+ * 검색한 뒤 나머지는 로컬 필터링만 해서(app.debate._search_candidates) 같은
+ * 검색을 중복으로 다시 하지 않는다. */
 export async function decideStream(
   query: string,
   onEvent: (event: DecideStreamEvent) => void,
   brand?: string,
   signal?: AbortSignal,
-  skipIntentCheck?: boolean
+  skipIntentCheck?: boolean,
+  baseQuery?: string
 ): Promise<void> {
   const response = await fetch(`${API_URL}/decide/stream`, {
     method: 'POST',
@@ -261,6 +268,7 @@ export async function decideStream(
       query,
       ...(brand ? { brand } : {}),
       ...(skipIntentCheck ? { skip_intent_check: true } : {}),
+      ...(baseQuery ? { base_query: baseQuery } : {}),
     }),
     signal,
   });
