@@ -9,7 +9,7 @@ from . import embeddings
 from . import facet_cache
 from . import llm_cache
 from . import price_table as price_table_module
-from .agents import deepseek, gpt, groq
+from .agents import deepseek, gpt, hcx
 from .intent import is_non_product_chitchat, needs_clarification
 from .schemas import (
     ClarifyFacet,
@@ -62,12 +62,12 @@ async def _search_with_query_variants(query: str) -> list[elevenst.ElevenstSearc
     "2프로랑 2%랑 이프로랑 다 똑같은 제품인데 상품 매핑이 안되는 문제") -
     11번가 검색 엔진이 사용자 표기("2프로")와 카탈로그 실제 표기("이프로")가
     달라 관련 상품을 하나도 못 찾을 수 있다(실측: "2프로"로 검색하면 "프로"
-    (Pro)가 붙은 카메라 삼각대·어댑터만 나옴). Groq이 제안한 대안 표기로
+    (Pro)가 붙은 카메라 삼각대·어댑터만 나옴). HCX가 제안한 대안 표기로
     하나씩 재검색해 관련 상품이 나오는 첫 표기를 쓴다 - 관련성 판정도 원래
     질의가 아니라 그 대안 표기 기준으로 한다(원래 질의로는 애초에 텍스트가
     안 겹쳐 항상 실패하므로 - 실측: "2프로"↔"이프로 ... 복숭아" 유사도
     13점, "이프로"↔같은 상품 100점)."""
-    variants = await groq.generate_query_variants(query)
+    variants = await hcx.generate_query_variants(query)
     for variant in variants:
         items = await elevenst.search_elevenst(variant, limit=10)
         relevant = [it for it in items if price_table_module._product_name_matches(variant, it["product_name"])]

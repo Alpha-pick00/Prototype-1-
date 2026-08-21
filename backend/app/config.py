@@ -32,6 +32,16 @@ class Settings:
     groq_api_base: str = os.environ.get("GROQ_API_BASE", "https://api.groq.com/openai/v1")
     groq_model: str = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 
+    # 검색어 표기 변형 폴백(app/agents/hcx.py::generate_query_variants) 전용 -
+    # CLOVA Studio(clovastudio.ncloud.com)에서 발급하는 키. OpenAI 호환
+    # 엔드포인트를 그대로 쓴다(json_object response_format은 미지원 - 프롬프트
+    # 지시 + parse_json_object 정규식 파싱으로 대신한다).
+    hcx_api_key: str | None = os.environ.get("HCX_API_KEY")
+    hcx_api_base: str = os.environ.get("HCX_API_BASE", "https://clovastudio.stream.ntruss.com/v1/openai")
+    # HCX-DASH-002 - 표기 변형 제안은 단순 작업이라 가장 가벼운/빠른 등급으로
+    # 충분하다(gpt.py의 thinking mode 비활성화와 같은 "느리면 안 된다" 원칙).
+    hcx_model: str = os.environ.get("HCX_MODEL", "HCX-DASH-002")
+
     google_vision_api_key: str | None = os.environ.get("GOOGLE_VISION_API_KEY")
 
     # LLM 응답 캐시(app/llm_cache.py) 저장소 - Supabase 프로젝트 URL + secret
