@@ -14,14 +14,19 @@ alpha-pick-jet.vercel.app
 > 2026-08-20 다나와→11번가 전환 이후 구조. 메인 결정 파이프라인(`/decide/stream`)과
 > AI 상세검색(`/decide/clarify`) 둘 다 다나와 직접 스크래핑을 배제하고 11번가 공식
 > 오픈API로 검색한다 — 메인 파이프라인은 그라운딩이 성공하면 제안(DeepSeek)·교차
-> 검증(DeepSeek)·심사(Groq)·쿠팡/네이버 교차확인까지 전부 조건부로 건너뛰어 "행복
+> 검증(DeepSeek)·심사(HCX)·쿠팡/네이버 교차확인까지 전부 조건부로 건너뛰어 "행복
 > 경로"는 LLM 호출이 사실상 0번이다. `/decide/clarify`는 처음엔 이 전환 범위 밖이라
 > 남아있었는데(다나와 Crawl-delay 10초 때문에 체감 지연의 주 원인이었다), 뒤늦게
 > 함께 11번가로 옮겼다 — 동시에 프론트가 첫 라운드마다 이 엔드포인트를 미리 불러보던
 > 사전 호출도 없앴다(`/decide/stream` 내부의 `run_clarify()` 안전망이 이미 완전히
 > 동일한 11번가 기반 facet 추출을 수행해 순수 중복 호출이었다). 다나와 코드는
 > `/decide/danawa-only`(LLM 미사용 실험 경로)와 핸드폰 기종처럼 표본이 특정 생태계로
-> 쏠릴 때의 보충 검색(`_ecosystem_name_pool`)에만 남아있다. 자세한 배경은
+> 쏠릴 때의 보충 검색(`_ecosystem_name_pool`)에만 남아있다. 2026-08-21부터는
+> "groq" 에이전트 슬롯(정제·심사·스타일가이드·카테고리분류·OCR정제)이 실제로
+> 호출하는 모델도 Groq에서 기업이 제공한 Naver Cloud CLOVA Studio(HCX-005)로
+> 바뀌었다 — 내부 식별자("groq")는 그대로 유지하고 호출 대상만 교체했다(과거
+> "gemini"→Groq 전환과 같은 패턴). DeepSeek(교차 검증)·Qwen(제안 폴백 일부)은
+> 이번 전환 범위 밖으로 남겨 교차 검증의 제공자 독립성을 유지한다. 자세한 배경은
 > [주요 의사결정 사항](#주요-의사결정-사항) 참고.
 
 ```mermaid
@@ -44,7 +49,7 @@ flowchart LR
     end
 
     subgraph PIPE["AI 오케스트레이션 · Google ADK (adk_pipeline)"]
-        REFINE["질의 정제<br/>(Groq · 대화체/인사말 질의만 조건부)"]
+        REFINE["질의 정제<br/>(HCX · 대화체/인사말 질의만 조건부)"]
         SEARCH["11번가 검색<br/>(오픈API · 구조화 가격/재고)"]
         ELEVENST["11번가 그라운딩<br/>(구조화 후보 확정 시도)"]
         subgraph PROPOSE["제안 · elevenst 그라운딩 실패시만 조건부 실행"]
@@ -53,7 +58,7 @@ flowchart LR
         end
         MERGE["병합 · 중복 제거<br/>(최저가 매물 기준 통합)"]
         CHALLENGE["교차 검증<br/>(DeepSeek · 후보 전부 구조화 출처면 스킵)"]
-        JUDGE["최종 심사<br/>(Groq · 후보 1개면 스킵)"]
+        JUDGE["최종 심사<br/>(HCX · 후보 1개면 스킵)"]
     end
 
     subgraph DANAWA["다나와 실측 가격 연동 · /decide/danawa-only 전용<br/>(+ 핸드폰 기종 등 생태계 쏠림 보충 검색)"]
@@ -106,11 +111,11 @@ flowchart LR
 | Frontend | React 18, Vite 6, TypeScript, Tailwind CSS v4, Framer Motion(`motion`), React Router (HashRouter) |
 | Backend | FastAPI, Python, httpx, PyJWT |
 | 멀티에이전트 오케스트레이션 | Google ADK(`SequentialAgent`/`ParallelAgent`), LiteLLM |
-| AI / 제안 · 검증 · 심사 | 11번가 구조화 후보(그라운딩 성공 시 확정, LLM 미사용) + DeepSeek(그라운딩 실패시만 조건부 폴백 제안) / DeepSeek — 교차 검증(challenge, 후보가 전부 구조화 출처면 건너뜀) / Groq(gpt-oss-120b) — 최종 심사(judge, 후보가 1개면 건너뜀) |
+| AI / 제안 · 검증 · 심사 | 11번가 구조화 후보(그라운딩 성공 시 확정, LLM 미사용) + DeepSeek(그라운딩 실패시만 조건부 폴백 제안) / DeepSeek — 교차 검증(challenge, 후보가 전부 구조화 출처면 건너뜀) / HCX-005(Naver Cloud CLOVA Studio, "groq" 슬롯) — 최종 심사(judge, 후보가 1개면 건너뜀) |
 | 검색 | 11번가 오픈API(ProductSearch, 구조화 가격/재고) + 정규화 질의 기반 검색 캐시 — 메인 파이프라인(`/decide/stream`)·AI 상세검색(`/decide/clarify`) 모두 이걸 쓴다. 0건일 때만 Tavily 비제한 검색으로 상품명을 발견해 재검색(최후 폴백), 쿠팡/네이버 교차확인 신호도 Tavily |
 | 다나와 실측 가격 연동 | `/decide/danawa-only`(LLM 미사용 실험 경로) 전용 + AI 상세검색의 핸드폰 기종처럼 특정 생태계로 표본이 쏠릴 때의 보충 검색(`_ecosystem_name_pool`) — 다나와 직접 검색/상세페이지 페치(`httpx` + `BeautifulSoup4`/`lxml`), 내부 AJAX 엔드포인트를 통한 최저가 판매처 브릿지 URL 해석. 메인 결정 파이프라인·AI 상세검색의 주 검색 경로는 둘 다 11번가로 대체돼 더 이상 다나와를 안 씀(`_DanawaFetchNode`는 참고용으로 코드에만 남음) |
 | Human-in-the-loop | DeepSeek가 상품명 목록에서 facet(라벨 자유, 상호 교차 필터링)을 추출 — `/decide/clarify`와 ADK 파이프라인 내부 안전망(`run_clarify`) 두 진입점이 하나의 공유 추출 파이프라인을 쓰고, 둘 다 11번가 검색 결과를 입력으로 받는다. 사용자 페르소나(로그인 선호도 + 세션 선택)도 두 진입점에 동일하게 반영된다. 되묻는 질문 문장은 Qwen이 실시간 생성(`/clarify/ask`) |
-| 이미지 인식 | Google Cloud Vision (텍스트 추출) → Groq (정제 · 검색어 추출) |
+| 이미지 인식 | Google Cloud Vision (텍스트 추출) → HCX-005 (정제 · 검색어 추출, "groq" 슬롯) |
 | 인증 | Google / Kakao / Naver OAuth2 + JWT 기반 세션 |
 | 저장소 | SQLite (검색 기록 · 자동완성 인덱스 · 검색 캐시) |
 | 배포 | Docker, nginx, certbot, AWS GPU 인스턴스, nip.io(Backend) / GitHub Pages, Vercel(Frontend), GitHub Actions(CI) |
@@ -155,6 +160,7 @@ flowchart LR
 | 2026-08-18 | 배포 터널 재소진 + 구 GitHub Pages URL 404 확인 후 터널 재기동·`VITE_API_URL` 갱신·재배포로 복구 · "gemini" 슬롯 기본 Groq 모델을 llama-3.3-70b-versatile → gpt-oss-20b로 교체 · 프론트엔드를 Vercel에도 배포하고 백엔드를 기존 AWS 인스턴스에 최신 코드로 재배포(저장소 재동기화, nginx+TLS를 새 인스턴스 IP로 재발급), CORS에 Vercel 도메인 추가 |
 | 2026-08-19 | 취향 주도 카테고리(패션의류/잡화 등)에 스타일 가이드 응답 모드 추가(검증된 후보를 스타일별로 그룹핑) · 토큰 사용량 최적화(clarify facet 추출 가드, classify_category 모델 재배정) · 저장소 전반 죽은 코드/미사용 설정·의존성 정리(백엔드·프론트엔드) · README 정리 |
 | 2026-08-20 | **메인 결정 파이프라인의 검색 백엔드를 Tavily+다나와 도메인 한정 → 11번가 오픈API로 전면 교체**(다나와 AWS IP 403 차단/Crawl-delay 불안정성 회피) · 제안 LLM을 Qwen/Groq/DeepSeek 3개 병렬 → 11번가 그라운딩 실패시만 조건부 호출되는 DeepSeek 1개로 축소, 그라운딩 성공 시 challenge/judge/쿠팡·네이버 교차확인까지 연쇄로 스킵(행복 경로 LLM 호출 0번) · 질의 정제(refine)를 대화체/인사말 질의(`looks_conversational_query`)에만 조건부로 재도입 · AI 상세검색 "카테고리" 되묻기를 프롬프트+코드 이중으로 제거 · AI 상세검색 facet 전체 선택 시 자동 제출, 드릴다운 질의 표시 정리, 대화체 질의 정제(`groq.refine_query`) 추가 · **뒤이어 AI 상세검색(`check_clarify_facets`)도 11번가로 마저 전환**(다나와 Crawl-delay가 여전히 남아있던 체감 지연의 주 원인이었음), 프론트가 첫 라운드마다 미리 불러보던 `/decide/clarify` 사전 호출을 제거(`/decide/stream` 내부 `run_clarify()`가 이미 동일한 11번가 기반 판정을 수행해 중복이었음), 사용자 페르소나(facet 순서 반영)를 `/decide/stream` 경로까지 관통시켜 사전 호출 제거로 인한 기능 손실 방지 |
+| 2026-08-21 | 기업에서 제공받은 Naver Cloud CLOVA Studio(HCX) API로 "groq" 에이전트 슬롯(정제·심사·스타일가이드·카테고리분류·OCR정제·AI 상세검색 정제)의 실제 호출 대상을 Groq → HCX-005로 교체(내부 식별자는 유지, 자격증명은 `HCX_API_KEY`/`HCX_API_BASE` 신규 도입) · `minsung` 브랜치(죽은 코드 정리 + README 아키텍처 갱신)를 `main`으로 PR |
 
 ### 주요 의사결정 사항
 
@@ -193,6 +199,7 @@ flowchart LR
 - **질의 정제(refine)를 조건부로 재도입**: 한 번 완전히 제거했다가("쿼리 재질의 없애고") "안녕 나 컵을 사고싶어"처럼 인사말/대화체로 감싼 질의가 정제 없이 그대로 11번가 keyword 검색에 들어가 검색·그라운딩이 둘 다 실패하는 회귀가 드러나(`_skip_refine_unless_conversational`) 재도입. 예전처럼 애매한 질의 전체가 아니라 `looks_conversational_query()`로 좁혀, 이미 짧고 깨끗한 검색어("음료수" 등)는 계속 LLM 호출 없이 건너뛴다
 - **AI 상세검색 "카테고리" 되묻기 완전 제거**: "이프로"·"초코파이"처럼 검색어 자체로 카테고리가 명백한데도 "카테고리에서 음료를 고르세요"라고 불필요하게 되묻던 문제 — DeepSeek 프롬프트에서 "카테고리" 라벨 예시를 제거하고, 프롬프트 지시와 무관하게 모델이 스스로 만들어내는 경우까지 대비해 코드 레벨에서도 `label=="카테고리"` facet을 한 번 더 필터링(이중 방어)
 - **AI 상세검색(`check_clarify_facets`)도 뒤이어 11번가로 전환, 사전 호출 자체를 제거**: 메인 파이프라인만 11번가로 옮기고 이 함수는 그대로 둔 채로 한 세션이 끝나, 사용자가 "다나와 기능에 있던 걸 다 옮겼어야지 왜 안 옮겼냐"고 지적 — 다시 보니 `/decide/stream`이 내부적으로 타는 `run_clarify()`가 이미 완전히 동일한 11번가 기반 facet 추출을 수행하고 있어서, 프론트가 첫 라운드마다 `/decide/clarify`를 미리 불러보던 사전 체크(`SearchContext.tsx::runTurn`)는 순수 중복 왕복이었다. 그 사전 호출을 없애고 `/decide/stream` 하나로 합쳤다 — `check_clarify_facets` 자체는 다나와→11번가로 검색만 갈아끼운 채 남겨서, AI 상세검색 카드의 자유 텍스트 입력 시 facet 실시간 재조회(`SearchResults.tsx`, `/decide/stream`으로는 대체할 수 없는 용도)에 계속 쓴다. base_query 캐시 재사용·카테고리 표본 좁히기 최적화는 다나와 Crawl-delay 회피가 목적이었어서 11번가에선 무의미해져 함께 제거했다. 사전 호출에만 있던 사용자 페르소나(로그인 선호도 + 세션 선택 기반 facet 순서 반영)가 조용히 없어지지 않도록, `main.py::_compute_persona`를 `/decide`·`/decide/stream`에도 적용하고 `persona` 파라미터를 `adk_pipeline.run`/`run_stream`의 내부 clarify 안전망까지 관통시켰다
+- **"groq" 슬롯의 실제 호출 대상을 Groq → Naver Cloud CLOVA Studio(HCX)로 재교체**: 기업에서 HCX API를 제공받아("지금 있는 llm api들 일단 hcx로 바꿔줘") 정제·심사·스타일가이드·카테고리분류·OCR정제·AI 상세검색 정제가 실제로 부르는 모델을 HCX-005로 바꿨다. 이번에도 "gemini"→Groq 전환 때처럼 이름을 바꿔달라는 요청이 없어 내부 식별자("groq" 모듈명·설정명)는 그대로 두고 호출 대상만 교체했다 - 자격증명은 `GROQ_API_KEY`를 재사용하지 않고 `HCX_API_KEY`/`HCX_API_BASE`를 새로 도입(전례와 동일한 관례). HCX가 OpenAI 호환 엔드포인트(`https://clovastudio.stream.ntruss.com/v1/openai`)를 제공해 기존 `AsyncOpenAI(api_key=, base_url=)` 패턴을 그대로 재사용할 수 있었다. HCX가 현재 문서화한 채팅 모델이 HCX-005 하나뿐이라 `groq_model`/`groq_refine_model`/`groq_judge_model` 세 설정이 전부 같은 모델을 가리키게 됐다(Groq gpt-oss-20b/120b처럼 크기로 나누던 예산 분리는 당분간 의미가 없어짐). DeepSeek(교차 검증)·Qwen(제안 폴백 일부)은 이번 1차 전환 범위 밖 - 서로 다른 제공자를 유지해 교차 검증의 독립성을 지킨다. `response_format={"type": "json_object"}`(Groq 전용 강제 JSON 모드)는 HCX 문서에 json_schema만 확인돼 제거하고, 다른 모듈처럼 프롬프트 지시 + 텍스트 파싱으로 통일
 
 ### 문제 해결 내역 (Troubleshooting)
 
@@ -259,11 +266,11 @@ sequenceDiagram
     participant P as DeepSeek(제안 · 그라운딩 실패시만 조건부)
     participant CP as 쿠팡·네이버(교차확인 · 참고신호 · 조건부)
     participant D as DeepSeek(교차 검증 · 조건부)
-    participant J as Groq(심사 · 조건부)
+    participant J as HCX(심사 · 조건부)
 
     U->>CTX: 검색어 입력(첫 턴)
     CTX->>B: POST /decide/stream (skip_intent_check=false)
-    B->>B: 질의 정제(Groq, 대화체/인사말 질의일 때만)
+    B->>B: 질의 정제(HCX, 대화체/인사말 질의일 때만)
     B->>Cache: 캐시 조회
     alt 캐시 미스
         B->>E: 11번가 검색

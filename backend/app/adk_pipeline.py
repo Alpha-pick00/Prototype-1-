@@ -872,8 +872,9 @@ def _skip_propose_if_elevenst_grounded(callback_context, llm_request) -> LlmResp
 
 
 def _groq_model(model_name: str) -> LiteLlm:
-    """Groq는 OpenAI 호환 엔드포인트라 "openai/" 프리픽스 뒤에 api_base/api_key로
-    Groq 엔드포인트를 직접 지정한다 - litellm이 groq 프로바이더를 자체 지원하는지에
+    """"groq" 슬롯(config.py 참고, 2026-08-21부터 실제로는 HCX를 호출한다)은
+    OpenAI 호환 엔드포인트라 "openai/" 프리픽스 뒤에 api_base/api_key로 그
+    엔드포인트를 직접 지정한다 - litellm이 groq/hcx 프로바이더를 자체 지원하는지에
     기대지 않고 "그냥 OpenAI 호환 엔드포인트"로 취급하는 쪽이 확실하다(agents/gpt.py의
     DashScope 처리와 동일한 접근). num_retries=0 - 사용자 요청(2026-08-15: "너무
     느려 더 빠르게"): 실패해도 각 단계마다 이미
@@ -1015,13 +1016,12 @@ def _build_judge_agent() -> LlmAgent:
 
     return LlmAgent(
         name="judge",
-        # judge는 2026-08-16부터 Claude가 아니라 Groq(openai/gpt-oss-120b)다
-        # (사용자 요청: "deepseek Qwen 빼고 싹 다 무료 모델로 바꾸려고 해" -
-        # Anthropic엔 상시 무료 API 티어가 없다). propose 쪽 groq 슬롯도 같은
-        # gpt-oss 계열이지만(2026-08-18부터 120b 공유 - config.py 주석 참고),
-        # judge는 계속 120b를 쓴다 - Groq 카탈로그에 구조화 출력(json_schema)을
-        # 지원하는 모델이 gpt-oss 계열뿐이라 propose·judge가 완전히 다른 계보를
-        # 쓰긴 어렵다.
+        # judge는 2026-08-16부터 Claude가 아니라 "groq" 슬롯이다(사용자 요청:
+        # "deepseek Qwen 빼고 싹 다 무료 모델로 바꾸려고 해" - Anthropic엔 상시
+        # 무료 API 티어가 없다). 그 슬롯이 실제로 부르는 모델은 이후 여러 번
+        # 바뀌었다(Groq gpt-oss-120b → 2026-08-21 HCX-005 - config.py의
+        # groq_judge_model 주석 참고) - output_schema(구조화 출력)를 지원하는
+        # 모델이어야 한다는 제약은 그대로 유지된다.
         model=_groq_model(settings.groq_judge_model),
         instruction=instruction,
         output_schema=judge_module.JudgeVerdict,

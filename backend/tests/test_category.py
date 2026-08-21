@@ -45,11 +45,15 @@ def _install_fake_client(monkeypatch, content: str) -> dict:
     return seen_kwargs
 
 
-def test_classify_category_uses_refine_model_not_the_shared_120b_model(monkeypatch):
+def test_classify_category_uses_the_refine_model_setting(monkeypatch):
     """토큰 절약(2026-08-19) - classify_category는 검색마다(스타일 가이드 게이트
-    때문에) 무조건 한 번씩 불려서, propose·judge·style_guide가 이미 몰려있는
-    groq_model(120b)이 아니라 groq_refine_model(20b)을 써야 한다(config.py 주석
-    참고 - 이 계정의 120b 일일 한도가 실측상 가장 먼저 소진됐다)."""
+    때문에) 무조건 한 번씩 불려서, 다른 슬롯(propose·judge·style_guide)이 쓰는
+    groq_model이 아니라 groq_refine_model을 명시적으로 써야 한다(config.py 주석
+    참고) - 이 자리에서 원래 Groq gpt-oss-120b/20b처럼 서로 다른 모델로 분리해
+    토큰 예산을 나누던 취지가 유지되는지 확인한다. 2026-08-21 HCX 전환 이후
+    groq_model과 groq_refine_model이 우연히 같은 값(HCX-005, 현재 HCX가 제공하는
+    유일한 채팅 모델)이 될 수 있어 "값이 다르다"는 더 이상 검증하지 않는다 -
+    두 설정이 각자 옳게 참조되는지만 본다."""
     seen_kwargs = _install_fake_client(
         monkeypatch, '{"category": "패션의류/잡화", "is_beverage": false}'
     )
@@ -57,7 +61,6 @@ def test_classify_category_uses_refine_model_not_the_shared_120b_model(monkeypat
     asyncio.run(category.classify_category("나이키 에어포스1", []))
 
     assert seen_kwargs["model"] == settings.groq_refine_model
-    assert seen_kwargs["model"] != settings.groq_model
 
 
 def test_classify_category_parses_valid_category(monkeypatch):
