@@ -1,7 +1,7 @@
 from openai import AsyncOpenAI
 
 from ..config import settings
-from .base import build_clarify_ask_prompt, build_recommend_prompt, parse_json_object
+from .base import build_recommend_prompt, parse_json_object
 
 # 이 모듈이 담당하는 에이전트 슬롯은 스키마/프론트엔드/테스트 전반에서
 # agent="gpt"로 식별된다(파일명·함수명도 그대로) - 하지만 실제로 호출하는
@@ -27,30 +27,6 @@ def _client() -> AsyncOpenAI:
 # False}를 주면 2초로 줄어든다). 이 프로젝트가 쓰는 프롬프트는 전부 JSON 한
 # 덩어리만 필요해서 추론 과정 자체가 필요 없다 - 이 모듈의 모든 호출에 끈다.
 _DISABLE_THINKING = {"enable_thinking": False}
-
-
-_CLARIFY_ASK_FALLBACK = "몇 가지 후보를 찾았어요 — 아래에서 골라주시겠어요?"
-
-
-async def generate_clarify_question(query: str, options: list[str]) -> str:
-    """이번 라운드에 물어봐야 할 축(브랜드/제품/용량/개수)의 후보들을 실제
-    상담원처럼 자연스러운 한 질문으로 바꾼다 — 프론트가 "브랜드를 선택하면
-    좁혀드려요" 같은 고정 라벨 대신 이 문장을 채팅 말풍선으로 보여준다.
-    호출 실패 시 고정 안내 문구로 대체한다."""
-    if not options:
-        return _CLARIFY_ASK_FALLBACK
-    try:
-        client = _client()
-        response = await client.chat.completions.create(
-            model=settings.qwen_model,
-            messages=[{"role": "user", "content": build_clarify_ask_prompt(query, options)}],
-            response_format={"type": "json_object"},
-            extra_body=_DISABLE_THINKING,
-        )
-        data = parse_json_object(response.choices[0].message.content or "")
-        return data.get("message") or _CLARIFY_ASK_FALLBACK
-    except Exception:
-        return _CLARIFY_ASK_FALLBACK
 
 
 async def recommend_best(query: str, candidates: list[dict]) -> tuple[int, str] | None:

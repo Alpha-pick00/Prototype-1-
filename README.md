@@ -220,10 +220,6 @@ flowchart LR
 
 ## 2️⃣ Project 과정 기록
 
-### 프로젝트 목표 및 배경
-
-여러 쇼핑몰의 가격을 일일이 비교하는 수고를 없애고, 근거가 있는 단일 추천을 제공하는 것이 목표. (배경은 [1️⃣ 주제 선정 배경](#주제-선정-배경) 참고)
-
 ### 데이터 소스 및 탐색
 
 - **검색 데이터**: 11번가 오픈 API(ProductSearch)로 실시간 조회 - 1st-party 구조화 XML 응답(상품명 · 가격 · 판매자 · 리뷰 수 · 구매만족도 · 상세 URL이 필드로 분리돼 있어, 스크래핑처럼 스니펫에서 오파싱할 위험이 없음)
@@ -281,10 +277,6 @@ sequenceDiagram
 후속 턴(`base_query`가 있는 턴)은 매번 재검색하는 대신 `base_query`로 한 번만 검색한
 결과를 로컬 필터링(`_filter_items_by_extra_terms`)으로 좁혀나간다. facet을 못 찾으면
 그대로 `/decide/stream` 경로로 넘어간다.
-
-### 트러블슈팅
-
-[1️⃣ 문제 해결 내역](#문제-해결-내역-troubleshooting) 참고.
 
 ### 성능/품질 개선 기록
 
@@ -346,7 +338,3 @@ xychart-beta
 - Supabase 기반 LLM 응답 캐시(`app/llm_cache.py`)는 스키마(`supabase/llm_cache.sql`)와 코드는 준비돼 있지만 실제 프로젝트 secret key가 아직 없어 비활성 상태(no-op) - 연결하면 별도 배포 작업 없이 바로 켜짐
 - Groq 검색어 표기 변형 재검색(`app/agents/groq.py::generate_query_variants`)은 1차 검색 실패 시에만 타는 폴백이라 평소 검색 속도에는 영향 없지만, 그 경로 자체는 추가 LLM 호출 + 재검색으로 몇 초 더 걸림
 - 프론트엔드의 `FixedAxisClarifyCard`(브랜드/제품/용량/개수 고정 축 UI)는 이제 아무 데이터도 안 받는 죽은 코드 경로 - 백엔드가 그 필드(`brands`/`products`/`volumes`/`quantities`)를 더 이상 채우지 않음, 정리는 후속 과제
-
-### 회고
-
-> `[팀 회고 내용 추가]`

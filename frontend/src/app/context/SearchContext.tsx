@@ -1,7 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import {
   checkClarifyFacets,
-  decide,
   decideStream,
   extractOcr,
   fetchServerHistory,
@@ -25,7 +24,6 @@ import {
   saveHistoryEntry,
   type HistoryEntry,
 } from '../lib/history';
-import type { ClarifyStep } from '../components/SearchResults';
 
 const fromServerEntry = (entry: ServerHistoryEntry): HistoryEntry => ({
   id: entry.id,
@@ -36,15 +34,13 @@ const fromServerEntry = (entry: ServerHistoryEntry): HistoryEntry => ({
 
 export type TurnStatus = 'loading' | 'result' | 'error';
 
-// ChatGPT/Claude 스타일 대화 스레드의 한 왕복(사용자 메시지 -> AI 오케스트레이션 답변).
-// displayQuery는 사용자 말풍선에 그대로 보여줄 텍스트, requestQuery/brand는
-// 실제로 서버에 던진 값 - 브랜드 선택 턴은 이 둘이 다르다(말풍선엔 "삼성"만
-// 보이지만 실제 요청은 원래 검색어+브랜드 조합이라 재시도 시 필요).
+// ChatGPT/Claude 스타일 대화 스레드의 한 왕복(사용자 메시지 -> 검색 결과).
+// displayQuery는 사용자 말풍선에 그대로 보여줄 텍스트, requestQuery는 실제로
+// 서버에 던진 값 - facet 답변을 이어붙인 턴은 이 둘이 다르다.
 export interface ChatTurn {
   id: string;
   displayQuery: string;
   requestQuery: string;
-  brand?: string;
   // AI 상세검색 드릴다운 체인의 맨 처음 검색어(속도 개선, 2026-08-13) - "핸드폰"
   // -> "핸드폰 삼성전자"로 좁혀가는 동안 이 값은 계속 "핸드폰"으로 고정된다.
   // checkClarifyFacets가 이걸 base_query로 보내 백엔드 캐시를 재사용한다.
@@ -52,8 +48,8 @@ export interface ChatTurn {
   status: TurnStatus;
   result: DecideResult | null;
   errorMessage: string;
-  // AI 오케스트레이션(adk_pipeline: 정제→검색→제안→검증→심사) 진행 상태 -
-  // decideStream이 이 턴을 처리하는 동안 status/proposal 이벤트로 채워진다.
+  // 검색 진행 상태 - decideStream이 이 턴을 처리하는 동안 status/proposal
+  // 이벤트로 채워진다.
   streamingStage: DecideStage | null;
   streamingProposals: Proposal[];
   // 메시지 시간 표시(사용자 요청, "클로드 너처럼 날짜기능") - epoch ms.
@@ -86,9 +82,7 @@ interface SearchContextValue {
   // 하므로, 여기서는 순수하게 시각적 표시 용도다.
   sessionPreferences: Record<string, string>;
   sendMessage: (q: string) => Promise<void>;
-  selectBrand: (turnId: string, brand: string) => Promise<void>;
   selectFacets: (turnId: string, selected: Record<string, string>) => Promise<void>;
-  selectClarifyOption: (turnId: string, step: Exclude<ClarifyStep, 'brand'>, value: string) => Promise<void>;
   retryTurn: (turnId: string) => Promise<void>;
   editTurn: (turnId: string, newQuery: string) => Promise<void>;
   handleImageUpload: (file: File) => Promise<void>;
@@ -115,25 +109,10 @@ export const dedupeAppend = (base: string, addition: string): string => {
   return [...baseTokens, ...newTokens].join(' ');
 };
 
-// 고정 축(product/volume/quantity) -> 사용자 페르소나 라벨 매핑. AI
-// 상세검색(facet)과 서로 다른 라벨 체계를 쓰므로("volume" vs 실제 facet 라벨
-// "용량"), 향후 facet 재정렬에서 실제로 매칭될 수 있는 축(용량)만 공용 라벨로
-// 옮겨 기록한다. product는 특정 상품명 그 자체라 재사용 가치가 낮아 기록하지 않는다.
-const CLARIFY_STEP_PERSONA_LABEL: Partial<Record<Exclude<ClarifyStep, 'brand'>, string>> = {
-  volume: '용량',
-  quantity: '구매유형',
-};
-
-const newTurn = (
-  displayQuery: string,
-  requestQuery: string,
-  brand?: string,
-  baseQuery?: string
-): ChatTurn => ({
+const newTurn = (displayQuery: string, requestQuery: string, baseQuery?: string): ChatTurn => ({
   id: crypto.randomUUID(),
   displayQuery,
   requestQuery,
-  brand,
   baseQuery: baseQuery || requestQuery,
   status: 'loading',
   result: null,
@@ -249,17 +228,15 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   // 턴 하나의 실제 검색/조회를 실행하고 그 턴만 갱신한다. sendMessage(새 턴 추가)/
-  // selectBrand/selectFacets/selectClarifyOption(후속 턴 추가)/retryTurn(기존 턴
-  // 재실행) 전부 이 위에서 돈다. AI 오케스트레이션(adk_pipeline, decideStream)이
-  // 이 함수 안쪽(백엔드 API 호출)에서 한 턴을 처리하는 stateless 단계를 맡는다 -
-  // 턴/대화/baseQuery 관리는 이 함수 바깥(sendMessage 등 호출부)의 책임이다.
+  // selectFacets(후속 턴 추가)/retryTurn(기존 턴 재실행) 전부 이 위에서 돈다.
+  // decideStream이 이 함수 안쪽(백엔드 API 호출)에서 한 턴을 처리하는
+  // stateless 단계를 맡는다 - 턴/대화/baseQuery 관리는 이 함수 바깥
+  // (sendMessage 등 호출부)의 책임이다.
   //
-  // skipIntentCheck - 이미 브랜드를 골랐거나(brand) 이전 턴에서 축적된 검색어로
-  // 이어가는 드릴다운 후속 턴(requestQuery !== baseQuery)이면 백엔드의 내부
-  // clarify 재판정(needs_clarification)을 건너뛴다 - 안 그러면 이미 한 번 답한
-  // 축(브랜드/용량 등)에 대해 서버가 또 clarify를 띄우는 재질문 버그가 생긴다
-  // (2026-08 통합 병합 승인안의 "skip_internal_clarify" 요구사항을 기존
-  // skip_intent_check 플래그로 구현).
+  // skipIntentCheck - 이전 턴에서 축적된 검색어로 이어가는 드릴다운 후속 턴
+  // (requestQuery !== baseQuery)이면 아래 looksAmbiguous 재질문 체크를
+  // 건너뛴다 - 안 그러면 이미 한 번 답한 축(용량 등)에 대해 또 clarify를
+  // 띄우는 재질문 버그가 생긴다.
   //
   // personaOverride - 바로 이 턴을 만든 선택(예: 방금 rememberPreference로 기록한
   // 라벨:값)을 checkClarifyFacets 호출에 즉시 반영하기 위한 값이다. setState는
@@ -269,25 +246,9 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
   const runTurn = async (
     id: string,
     requestQuery: string,
-    brand?: string,
     baseQuery?: string,
     personaOverride?: Record<string, string>
   ) => {
-    if (brand) {
-      try {
-        const data = await decide(requestQuery, brand);
-        patchTurn(id, { status: 'result', result: data });
-        persistHistoryEntry(requestQuery, data).catch(() => {});
-      } catch (err) {
-        patchTurn(id, {
-          status: 'error',
-          errorMessage:
-            err instanceof ApiError ? err.message : '요청 중 문제가 발생했습니다. 잠시 후 다시 시도해주세요.',
-        });
-      }
-      return;
-    }
-
     const skipIntentCheck = requestQuery !== (baseQuery ?? requestQuery);
 
     try {
@@ -324,8 +285,6 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
           }
         },
         undefined,
-        undefined,
-        skipIntentCheck,
         baseQuery
       );
 
@@ -350,24 +309,11 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
     if (!trimmed) return;
     const turn = newTurn(trimmed, trimmed);
     appendTurn(activeConversationId, turn);
-    await runTurn(turn.id, turn.requestQuery, undefined, turn.baseQuery);
-  };
-
-  // clarify 카드에서 브랜드를 고르면 "새 메시지를 보낸 것"처럼 같은 대화에 이어붙인다 -
-  // 원래 검색어는 그대로 두고 브랜드만 골라 재조회하는 후속 질문 취급.
-  const selectBrand = async (turnId: string, brand: string) => {
-    const origin = findTurn(turnId);
-    const conversation = conversations.find((c) => c.turns.some((t) => t.id === turnId));
-    if (!origin || !conversation) return;
-    rememberPreference('브랜드', brand);
-    const turn = newTurn(brand, origin.requestQuery, brand);
-    appendTurn(conversation.id, turn);
-    await runTurn(turn.id, turn.requestQuery, turn.brand);
+    await runTurn(turn.id, turn.requestQuery, turn.baseQuery);
   };
 
   // AI 상세검색 카드에서 기준(facet) 옵션을 하나 고르면 원래 검색어 뒤에 덧붙여
-  // 같은 대화에 새 메시지처럼 이어붙인다. brand 파라미터를 안 써서(run_brand_price가
-  // 아니라) 일반 검색 경로를 그대로 타므로, 조합한 검색어가 여전히 애매하면
+  // 같은 대화에 새 메시지처럼 이어붙인다. 조합한 검색어가 여전히 애매하면
   // runTurn의 clarify 선체크가 다시 걸려 자연스럽게 여러 턴에 걸쳐 좁혀나갈 수 있다.
   // baseQuery는 origin에서 그대로 물려받는다(origin.requestQuery가 아니라) -
   // 드릴다운 체인 전체가 맨 처음 검색어 하나로 고정돼야 백엔드가 매번 그
@@ -389,34 +335,16 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
     // 합쳐져 있었지만, 말풍선에 보여주는 displayQuery는 방금 고른 값만
     // (values.join)이라 마치 이전 맥락이 사라진 것처럼 보였다. 실제 검색어와
     // 화면 표시를 일치시킨다.
-    const turn = newTurn(combined, combined, undefined, origin.baseQuery);
+    const turn = newTurn(combined, combined, origin.baseQuery);
     appendTurn(conversation.id, turn);
-    await runTurn(turn.id, turn.requestQuery, undefined, turn.baseQuery, selected);
-  };
-
-  // 고정 축(제품/용량/개수) clarify 카드에서 옵션 하나를 골랐을 때 - selectFacets와
-  // 같은 방식으로 검색어에 이어붙여 같은 대화의 후속 턴을 만든다(run_brand_price로
-  // 단축하지 않고 일반 검색 경로를 그대로 탄다).
-  const selectClarifyOption = async (turnId: string, step: Exclude<ClarifyStep, 'brand'>, value: string) => {
-    const origin = findTurn(turnId);
-    const conversation = conversations.find((c) => c.turns.some((t) => t.id === turnId));
-    if (!origin || !conversation) return;
-    const personaLabel = CLARIFY_STEP_PERSONA_LABEL[step];
-    const personaOverride = personaLabel ? { [personaLabel]: value } : undefined;
-    if (personaLabel) rememberPreference(personaLabel, value);
-    const combined = dedupeAppend(origin.requestQuery, value).trim();
-    // 2026-08-18: selectFacets와 같은 이유로 displayQuery도 combined로 맞춘다 -
-    // 방금 고른 값만 보여주면 이전 검색어가 빠진 것처럼 보인다.
-    const turn = newTurn(combined, combined, undefined, origin.baseQuery);
-    appendTurn(conversation.id, turn);
-    await runTurn(turn.id, turn.requestQuery, undefined, turn.baseQuery, personaOverride);
+    await runTurn(turn.id, turn.requestQuery, turn.baseQuery, selected);
   };
 
   const retryTurn = async (turnId: string) => {
     const turn = findTurn(turnId);
     if (!turn) return;
     patchTurn(turnId, { status: 'loading', errorMessage: '', streamingStage: null, streamingProposals: [] });
-    await runTurn(turnId, turn.requestQuery, turn.brand, turn.baseQuery);
+    await runTurn(turnId, turn.requestQuery, turn.baseQuery);
   };
 
   // 내 메시지 편집(사용자 요청, "클로드 너처럼 ... 편집기능") - 클로드처럼 편집한
@@ -438,7 +366,7 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
           : c
       )
     );
-    await runTurn(edited.id, edited.requestQuery, undefined, edited.baseQuery);
+    await runTurn(edited.id, edited.requestQuery, edited.baseQuery);
   };
 
   const handleImageUpload = async (file: File) => {
@@ -549,9 +477,7 @@ export const SearchProvider = ({ children }: { children: React.ReactNode }) => {
         history,
         sessionPreferences,
         sendMessage,
-        selectBrand,
         selectFacets,
-        selectClarifyOption,
         retryTurn,
         editTurn,
         handleImageUpload,

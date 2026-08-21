@@ -95,13 +95,6 @@ class JudgeVerdict(BaseModel):
 
 class DecideRequest(BaseModel):
     query: str
-    brand: str | None = None
-    # Human-in-the-loop으로 브랜드/용량/개수를 이미 하나 골라 검색어에 이어붙여
-    # 재검색하는 요청이면 True — is_bulk_query()/needs_clarification() 같은
-    # "첫 질의가 애매한지" 판단용 휴리스틱을 건너뛴다. 이미 특정 상품을 좁혀가는
-    # 중인데, 예컨대 "80ml"처럼 용량이 붙은 재검색어가 새 대량구매 질의로
-    # 오판되는 걸 막기 위함.
-    skip_intent_check: bool = False
     # /decide/clarify 전용(app.debate.check_clarify_facets) - AI 상세검색을
     # 여러 턴에 걸쳐 좁혀나갈 때(예: "핸드폰" -> "핸드폰 삼성전자") base_query에
     # 그 드릴다운의 맨 처음 검색어를 넘기면, 백엔드가 그걸로 검색한 뒤 나머지는
@@ -238,15 +231,6 @@ class ClarifyResponse(BaseModel):
     mode: Literal["clarify"] = "clarify"
     query: str
     options: ClarifyOptions
-
-
-class ClarifyAskRequest(BaseModel):
-    query: str
-    options: list[str]
-
-
-class ClarifyAskResponse(BaseModel):
-    message: str
 
 
 class BrandPriceResponse(BaseModel):
