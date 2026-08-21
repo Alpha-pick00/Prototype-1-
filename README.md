@@ -18,7 +18,7 @@ alpha-pick-jet.vercel.app
 > 랭킹 + LLM 최종 선택) → 최종 추천의 단순한 선형 파이프라인이다. Human-in-the-loop은
 > 텍스트 재검색 대신 구조적 로컬 필터링으로 후보군을 좁혀나가고(카테고리 축은 11번가가
 > 카테고리 필터 자체를 지원하지 않아 되묻지 않음), 검색어 표기가 카탈로그와 다를 때만
-> (예: "2프로"↔"이프로") Groq이 대안 표기를 제안해 재검색한다. 자세한 배경은
+> (예: "2프로"↔"이프로") HCX가 대안 표기를 제안해 재검색한다. 자세한 배경은
 > [주요 의사결정 사항](#주요-의사결정-사항) 참고.
 
 ```mermaid
@@ -32,7 +32,6 @@ flowchart LR
     subgraph BE["Backend · FastAPI (AWS)"]
         DECIDE["POST /decide/stream<br/>(메인 검색 흐름)"]
         CLARIFYF["POST /decide/clarify<br/>(AI 상세검색 · facet)"]
-        CHAT["POST /clarify/ask<br/>(대화형 봇 질문 생성)"]
         OCR["POST /ocr/extract"]
         AUTH["/auth/*"]
         HIST["/history"]
@@ -42,7 +41,7 @@ flowchart LR
     subgraph CORE["run_elevenst_only_debate(app/debate.py)"]
         SEARCH11["11번가 검색<br/>(base_query 있으면 구조적 필터, 없으면 직접 검색)"]
         VERIFY["관련성 검증<br/>(_product_name_matches)"]
-        VARIANT["검색 실패 시 표기 변형 재검색<br/>(Groq, '2프로'↔'이프로' 등)"]
+        VARIANT["검색 실패 시 표기 변형 재검색<br/>(HCX, '2프로'↔'이프로' 등)"]
         RANK["관련도 랭킹<br/>(Qwen 임베딩 코사인 유사도)"]
         RECOMMEND["추천 Agent<br/>(Qwen - 가격·리뷰·구매만족도 종합)"]
     end
@@ -56,8 +55,9 @@ flowchart LR
 
     subgraph EXT["외부 서비스"]
         ELEVENST["11번가 오픈 API<br/>(ProductSearch · Categories)"]
-        QWEN["Qwen(DashScope)<br/>임베딩 · 추천 Agent · clarify 질문 생성"]
-        GROQ["Groq<br/>검색어 표기 변형 · OCR 정제"]
+        QWEN["Qwen(DashScope)<br/>임베딩 · 추천 Agent"]
+        HCX["HCX(HyperCLOVA X)<br/>검색어 표기 변형"]
+        GROQ["Groq<br/>OCR 정제"]
         DEEPSEEKAI["DeepSeek<br/>facet 추출"]
         VISION["Google Vision OCR"]
         OAUTH["Google · Kakao · Naver"]
@@ -68,7 +68,6 @@ flowchart LR
     GCI --> CTX
     CTX --> DECIDE
     CTX --> CLARIFYF
-    GCI --> CHAT
     GCI --> OCR
     SB --> AUTH
     SB --> HIST
@@ -77,7 +76,7 @@ flowchart LR
     VERIFY -- "관련 상품 0건" --> VARIANT --> VERIFY
     VERIFY -- "검증된 후보군" --> RANK --> RECOMMEND
     SEARCH11 --> ELEVENST
-    VARIANT --> GROQ
+    VARIANT --> HCX
     RANK --> QWEN
     RECOMMEND --> QWEN
     RECOMMEND -- 최종 추천 --> DECIDE
@@ -87,7 +86,6 @@ flowchart LR
     CFSEARCH --> CFEXTRACT --> DEEPSEEKAI
     CFEXTRACT <-.-> LLMCACHE
     CFEXTRACT -- facets --> CLARIFYF
-    CHAT --> QWEN
 
     OCR --> VISION
     OCR --> GROQ
@@ -105,8 +103,8 @@ flowchart LR
 | 검색 | 11번가 오픈 API(ProductSearch · Categories) - 1st-party 구조화 데이터, 스크래핑 없음 |
 | 관련성 검증 | rapidfuzz 토큰 유사도 + 모델/규격 토큰 충돌 가드 + 상호배타 토큰 가드(`_product_name_matches`) - 검색어와 실제로 일치하는 상품만 후보로 인정 |
 | 추천 Agent | Qwen(DashScope) 임베딩(`text-embedding-v3`)으로 후보를 관련도순 정렬 → Qwen이 가격·리뷰·구매만족도를 종합해 최종 추천 선택(실패 시 최저가 규칙 기반 폴백) |
-| 검색어 표기 변형 | Groq(GPT-OSS) - 1차 검색이 관련 상품을 못 찾으면 카탈로그 표기 차이(예: "2프로"↔"이프로"↔"2%")를 추론해 대안 표기로 재검색 |
-| Human-in-the-loop | DeepSeek가 11번가 검색 상품명 목록에서 facet(라벨 자유, 상호 교차 필터링)을 추출. 카테고리 축은 되묻지 않고(11번가가 카테고리 필터 미지원), 드릴다운 후속 턴은 재검색 대신 순수 로컬 필터링으로 후보군을 좁힘. 되묻는 질문 문장은 Qwen이 실시간 생성(`/clarify/ask`) |
+| 검색어 표기 변형 | HCX(HyperCLOVA X, HCX-DASH-002) - 1차 검색이 관련 상품을 못 찾으면 카탈로그 표기 차이(예: "2프로"↔"이프로"↔"2%")를 추론해 대안 표기로 재검색 |
+| Human-in-the-loop | DeepSeek가 11번가 검색 상품명 목록에서 facet(라벨 자유, 상호 교차 필터링)을 추출. 카테고리 축은 되묻지 않고(11번가가 카테고리 필터 미지원), 드릴다운 후속 턴은 재검색 대신 순수 로컬 필터링으로 후보군을 좁힘 |
 | LLM 응답 캐시 | Supabase(Postgres + pgvector) 기반 KV(완전 일치) + 시맨틱(임베딩 유사도) 2단 캐시 - 선택적, 미설정 시 안전하게 no-op |
 | 이미지 인식 | Google Cloud Vision (텍스트 추출) → Groq (정제 · 검색어 추출) |
 | 인증 | Google / Kakao / Naver OAuth2 + JWT 기반 세션 |
@@ -190,6 +188,7 @@ flowchart LR
 | 2026-08-18 | 배포 터널 재소진 + 구 GitHub Pages URL 404 확인 후 터널 재기동·`VITE_API_URL` 갱신·재배포로 복구 · "gemini" 슬롯 기본 Groq 모델을 llama-3.3-70b-versatile → gpt-oss-20b로 교체 · 프론트엔드를 Vercel에도 배포하고 백엔드를 기존 AWS 인스턴스에 최신 코드로 재배포(저장소 재동기화, nginx+TLS를 새 인스턴스 IP로 재발급), CORS에 Vercel 도메인 추가 |
 | 2026-08-19 | 취향 주도 카테고리(패션의류/잡화 등)에 스타일 가이드 응답 모드 추가(검증된 후보를 스타일별로 그룹핑) · 토큰 사용량 최적화(clarify facet 추출 가드, classify_category 모델 재배정) · 저장소 전반 죽은 코드/미사용 설정·의존성 정리(백엔드·프론트엔드) · README 정리 |
 | 2026-08-20 | **다나와 스크래핑 + Tavily 검색 + Google ADK 멀티에이전트 디베이트 파이프라인 전체 제거, 11번가 오픈 API(ProductSearch) 하나로 통일**(현재 아키텍처의 골격) · 추천 Agent 추가(Qwen 임베딩 관련도 랭킹 + LLM 최종 선택, 실패 시 최저가 폴백) · HITL을 쿼리 재구성 재검색 방식에서 구조적 로컬 필터링으로 재설계(카테고리 축은 11번가가 필터 미지원이라 되묻지 않음) · Supabase 기반 LLM 응답 캐시(KV+시맨틱) 스캐폴딩 · Qwen "thinking mode" 비활성화로 응답 지연 20~95초 → 2~5초 단축 · Groq 기반 검색어 표기 변형 폴백 추가("2프로"/"이프로"/"2%" 매핑) · GitHub 브랜치 보호 규칙 추가(main은 최소 1인 승인 필수) |
+| 2026-08-21 | 브랜드 단축검색/대량구매 생성 경로 + 고정 4축 clarify UI(`FixedAxisClarifyCard`) + 미사용 `skip_intent_check` 요청 필드 제거 · README 팀원 구성 절을 커밋 이력 기반 상세 기여 목록으로 확장(개인 포트폴리오용) · 검색어 표기 변형 폴백을 Groq에서 HCX(HyperCLOVA X, `HCX-DASH-002`)로 교체 |
 
 ### 주요 의사결정 사항
 
@@ -230,6 +229,8 @@ flowchart LR
 - **Groq 기반 검색어 표기 변형 폴백**: 11번가 검색 엔진이 사용자 표기("2프로")와 카탈로그 표기("이프로"/"2%")가 달라 관련 상품을 하나도 못 찾는 경우가 있음을 실측 확인 - 1차 검색 실패 시에만 Groq이 대안 표기를 제안해 재검색(관련성 판정도 원래 질의가 아니라 변형 표기 기준)
 - **Supabase 기반 LLM 응답 캐시 스캐폴딩**: KV(완전 일치)+시맨틱(임베딩 유사도) 2단 캐시를 facet 추출(호출당 최대 8회 LLM 호출 가능)에 배선 - `SUPABASE_URL`/`SUPABASE_KEY` 미설정 시 안전하게 no-op
 - **GitHub 브랜치 보호 규칙 추가**: `main`에 최소 1인 승인 필수 + 승인 후 새 커밋 시 재승인 필요(dismiss stale reviews) + 직접 push/force-push/삭제 차단 - 이후 작업은 브랜치 생성 → PR → 리뷰 승인 → 머지 순서로 진행
+- **브랜드 단축검색/대량구매 생성 경로 및 고정 4축 clarify UI 제거**: `check_clarify_facets`(facet 추출)가 `brands`/`products`/`volumes`/`quantities`를 채우지 않게 되며 두 기능(브랜드로 바로 검색하는 단축 경로, 고정 4축 UI `FixedAxisClarifyCard`)이 조용히 죽은 코드가 돼있던 것을 발견 - 새로 생성하는 경로만 프론트/백엔드 양쪽에서 제거하고, 과거 저장된 히스토리에 남아있을 수 있는 표시 경로·타입은 하위호환을 위해 유지. 같은 조사 과정에서 백엔드가 더 이상 읽지 않던 `skip_intent_check` 요청 필드도 함께 제거(프론트의 로컬 되묻기 게이팅 용도는 유지)
+- **검색어 표기 변형 폴백을 Groq에서 HCX(HyperCLOVA X)로 교체**: 한국어 표기 변형 추론(예: "2프로"↔"이프로"↔"2%")은 한국어 특화 모델이 유리하다고 판단해 교체. CLOVA Studio의 OpenAI 호환 엔드포인트(`HCX-DASH-002`)를 그대로 사용하되, `response_format`의 `json_object` 모드를 지원하지 않아 프롬프트 지시 + 정규식 파싱으로 대체. OCR 정제(`app/ocr/cleanup.py`)는 별개 기능이라 Groq를 그대로 유지
 
 ### 문제 해결 내역 (Troubleshooting)
 
@@ -252,6 +253,7 @@ flowchart LR
 - **OCR 정제/카테고리분류/propose "gemini" 슬롯이 전부 404로 실패**: Groq가 `llama-3.3-70b-versatile`을 무료 티어에서 서비스 종료 → `gpt-oss-20b`로 교체. 이후 refine과 예산을 나눠 쓰며 더 빨리 소진되는 게 확인돼 `gpt-oss-120b`로 재조정
 - **AWS 재배포 직후 실제 검색이 전부 실패**: Tavily가 플랜 한도 초과(432) 반환 → 새 키로 교체, 로컬/AWS 양쪽 `.env` 갱신
 - **Vercel GitHub 연동 프리뷰 빌드가 매번 실패**: Root Directory 설정이 비어 있어 리포 루트에서 빌드 시도 → Vercel API로 `rootDirectory: "frontend"` 설정
+- **HCX API 키가 401로 거부됨**: CLOVA Studio 콘솔에서 발급받은 키가 구버전(테스트/서비스 앱) 형식이었음 - OpenAI 호환 엔드포인트(`/v1/openai`)는 `nv-`로 시작하는 신버전 키만 받는다("Invalid Key - Please use new API Key that starts with 'nv-*'") → `nv-`로 시작하는 키로 재발급받아 해결. 두 발급 체계가 다르다는 점이 문서에 명시돼 있지 않아 처음엔 원인 파악에 혼선
 
 ---
 
@@ -266,7 +268,7 @@ flowchart LR
 ### 전처리(검색 결과 정제) 방법
 
 - 관련성 검증(`_product_name_matches`): 토큰 유사도(rapidfuzz) + 모델/규격 토큰 충돌 가드 + 상호배타 토큰 가드 3단 - 검색어와 실제로 같은 상품인지 확인된 후보만 남김
-- 검색어 표기가 카탈로그와 달라(예: "2프로") 1차 검색이 관련 상품을 하나도 못 찾으면, Groq이 대안 표기를 제안해 재검색
+- 검색어 표기가 카탈로그와 달라(예: "2프로") 1차 검색이 관련 상품을 하나도 못 찾으면, HCX가 대안 표기를 제안해 재검색
 - OCR 원문에서 가격/바코드/프로모션 문구를 제거하고 상품명·용량 등 핵심 메타데이터만 남기는 Groq 정제 단계(`search_query` 추출)
 
 ### 평가 기준 (무엇으로 "좋은 답"을 판단할지)
@@ -287,7 +289,7 @@ sequenceDiagram
     participant CTX as SearchContext.runTurn
     participant B as 백엔드(run_elevenst_only_debate)
     participant E as 11번가 오픈 API
-    participant G as Groq
+    participant H as HCX
     participant Q as Qwen
 
     U->>CTX: 검색어 입력(첫 턴)
@@ -296,8 +298,8 @@ sequenceDiagram
     E-->>B: 검색 결과
     B->>B: 관련성 검증(_product_name_matches)
     alt 관련 상품 0건(카탈로그 표기가 다름 - 예: "2프로")
-        B->>G: 대안 표기 제안 요청
-        G-->>B: 변형 표기 목록(예: "이프로", "2%")
+        B->>H: 대안 표기 제안 요청
+        H-->>B: 변형 표기 목록(예: "이프로", "2%")
         B->>E: 변형 표기로 재검색
         E-->>B: 검색 결과
     end
@@ -373,5 +375,4 @@ xychart-beta
 - 검색 범위가 11번가 하나뿐 - 다른 오픈마켓도 구조화 API를 제공하면 같은 패턴(`fetchers/elevenst.py`)으로 확장 가능
 - 11번가 오픈 API가 카테고리 코드 필터를 지원하지 않아(dispCtgrNo를 줘도 결과가 안 바뀜을 실측 확인), AI 상세검색의 카테고리 축은 사용자에게 되묻지 않고 표본을 좁히는 데도 안 씀 - 다른 축(브랜드/모델/용량)만으로 좁혀나감
 - Supabase 기반 LLM 응답 캐시(`app/llm_cache.py`)는 스키마(`supabase/llm_cache.sql`)와 코드는 준비돼 있지만 실제 프로젝트 secret key가 아직 없어 비활성 상태(no-op) - 연결하면 별도 배포 작업 없이 바로 켜짐
-- Groq 검색어 표기 변형 재검색(`app/agents/groq.py::generate_query_variants`)은 1차 검색 실패 시에만 타는 폴백이라 평소 검색 속도에는 영향 없지만, 그 경로 자체는 추가 LLM 호출 + 재검색으로 몇 초 더 걸림
-- 프론트엔드의 `FixedAxisClarifyCard`(브랜드/제품/용량/개수 고정 축 UI)는 이제 아무 데이터도 안 받는 죽은 코드 경로 - 백엔드가 그 필드(`brands`/`products`/`volumes`/`quantities`)를 더 이상 채우지 않음, 정리는 후속 과제
+- HCX 검색어 표기 변형 재검색(`app/agents/hcx.py::generate_query_variants`)은 1차 검색 실패 시에만 타는 폴백이라 평소 검색 속도에는 영향 없지만, 그 경로 자체는 추가 LLM 호출 + 재검색으로 몇 초 더 걸림
