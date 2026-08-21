@@ -317,6 +317,174 @@ sequenceDiagram
 결과를 로컬 필터링(`_filter_items_by_extra_terms`)으로 좁혀나간다. facet을 못 찾으면
 그대로 `/decide/stream` 경로로 넘어간다.
 
+### API 상세 명세 (요청 → 내부 플로우 → 응답 값)
+
+`backend/app/schemas.py`(Pydantic 모델) 기준 실제 필드. 코드가 바뀌면 이 절도 같이
+갱신해야 한다 - 아래는 2026-08-21 기준.
+
+#### `POST /decide/stream` — 메인 검색(NDJSON 스트리밍, 프론트가 실제로 쓰는 경로)
+
+**요청** (`DecideRequest`, 이 엔드포인트가 쓰는 필드만)
+
+| 필드 | 타입 | 의미 |
+| --- | --- | --- |
+| `query` | `str` | 검색어(필수) |
+| `base_query` | `str \| null` | 드릴다운 후속 턴이면 그 체인의 첫 검색어(구조적 로컬 필터링용, 없으면 매번 새로 검색) |
+
+**내부 플로우** (`app.debate.run_elevenst_only_debate_stream` → `run_elevenst_only_debate`)
+
+1. `status` 이벤트 즉시 전송 → 프론트가 "11번가에서 검색하고 있습니다" 표시
+2. `_search_candidates`: `base_query`가 있으면 그걸로 90개 검색 후 로컬 필터링, 없으면 `query`로 10개 직접 검색(11번가 `ProductSearch`)
+3. `_product_name_matches`(rapidfuzz 토큰 유사도 + 모델/규격 충돌 가드 + 상호배타 토큰 가드)로 관련 없는 결과 제거 - 0건이면 `_search_with_query_variants`가 HCX에게 대안 표기를 물어 재검색
+4. 그래도 0건이면 `RuntimeError` → `error` 이벤트로 스트리밍되고 흐름 종료
+5. 검증된 후보를 Qwen 임베딩(`text-embedding-v3`) 코사인 유사도로 관련도순 정렬(`_rank_by_relevance`) → 이 순서 그대로가 응답의 `proposals`
+6. `gpt.recommend_best`(실제 호출 모델은 Qwen)가 가격·리뷰 수·구매만족도를 보고 최종 index 선택 → 실패(키 없음/API 오류/응답 파싱 실패)하면 최저가 규칙 기반으로 폴백
+7. `final` 이벤트로 완성된 `DecideResponse` 전체를 한 번에 전송
+
+**스트리밍 이벤트** (한 줄에 JSON 객체 하나, `\n`으로 구분 - `application/x-ndjson`)
+
+| `type` | 페이로드 | 시점 |
+| --- | --- | --- |
+| `status` | `{"stage": "searching"}` | 흐름 시작 직후 1회 |
+| `final` | `{"result": DecideResponse}` | 성공 종료 시 1회(아래 응답 값 참고) |
+| `error` | `{"message": str}` | 검증된 후보를 끝내 못 찾거나 예외 발생 시 |
+
+**응답 값 — `DecideResponse`** (`final` 이벤트의 `result`, `/decide`의 응답 본문과 동일)
+
+```json
+{
+  "mode": "single",
+  "query": "나이키 에어포스1",
+  "proposals": [
+    {
+      "agent": "elevenst",
+      "product_name": "나이키 에어포스 1 07 화이트",
+      "price": "129,000원",
+      "retailer": "나이키공식스토어",
+      "url": "https://www.11st.co.kr/products/1234567",
+      "reasoning": "11번가 오픈 API 검증 결과 (관련도순 - 함께 볼만한 상품)",
+      "error": null,
+      "verified": true,
+      "challenge_note": null,
+      "proposed_by": null
+    }
+  ],
+  "decision": {
+    "product_name": "나이키 에어포스 1 07 화이트",
+    "price": "129,000원",
+    "retailer": "나이키공식스토어",
+    "url": "https://www.11st.co.kr/products/1234567",
+    "reasoning": "11번가 실측 검증 후보 중 추천 Agent(Qwen)가 선택 - 가격과 리뷰 수 모두 우수합니다",
+    "chosen_agent": "elevenst",
+    "price_source": "elevenst_offer",
+    "verified": null
+  },
+  "price_table": null,
+  "style_guide": null
+}
+```
+
+- `proposals[]`: 검증 통과한 후보 전부, 관련도순 - "함께 볼만한 상품" 목록으로 그대로 노출됨. 이 경로에서는 `agent`가 항상 `"elevenst"`, `verified`가 항상 `true`(1st-party 구조화 데이터라 조회된 것 자체가 검증). `error` · `challenge_note` · `proposed_by`는 옛 다나와/ADK 멀티에이전트 시절 필드라 이 경로에서는 항상 `null`(스키마 하위 호환용으로 유지 - `HistoryEntry`에 저장된 과거 기록이 이 필드들을 쓸 수 있어서 타입만 남겨둠)
+- `decision`: 최종 추천 1건. `price_source`는 항상 `"elevenst_offer"`(11번가 실측가 그대로, LLM 추정 아님). `chosen_agent`는 항상 `"elevenst"`. **`verified` 필드는 현재 항상 `null`** - 다나와/ADK 시절의 challenge 교차검증 단계가 11번가 전환과 함께 제거되면서 이 필드를 채우는 코드가 없다(스키마엔 남아있지만 현재 파이프라인에서는 죽은 값 - 관련도 검증 자체는 `proposals` 진입 전에 이미 규칙 기반으로 끝났으므로 별도 challenge 없이도 안전함)
+- `price_table` · `style_guide`: 각각 다나와 가격표 시절, 취향 주도 카테고리(패션 등) 전용 필드 - 메인 검색 흐름에서는 항상 `null`
+
+#### `POST /decide` — 위와 동일한 로직, 스트리밍 없이 완성된 `DecideResponse` 하나만 반환
+
+내부적으로 `run_elevenst_only_debate`를 직접 호출(스트리밍 래퍼만 없음). 응답 본문은 위
+`DecideResponse` 예시와 완전히 동일. 프론트는 로딩 UX 때문에 이 엔드포인트 대신 항상
+`/decide/stream`을 쓴다.
+
+#### `POST /decide/clarify` — AI 상세검색(멀티턴 facet 되묻기)
+
+**요청**: `DecideRequest`와 동일(`session_preferences`도 여기서만 실제로 쓰인다 - 로그인
+계정의 영구 선호도와 병합해 facet 옵션 순서에 반영)
+
+**내부 플로우** (`app.debate.check_clarify_facets`)
+
+1. 정적 facet 캐시(정규식 매칭)에서 먼저 찾아보고, 없으면 11번가에서 `base_query`(또는
+   `query`)로 90개 검색
+2. DeepSeek(`extract_facets_from_names`)이 검색된 상품명 목록에서 라벨 자유형 facet
+   (브랜드/시리즈/용량 등)을 추출 - 브랜드가 여러 개면 `_enrich_facets_per_brand`가
+   브랜드별로 병렬 재호출해 시리즈/모델처럼 특정 브랜드에 치우치기 쉬운 축을 보강
+3. `_attach_facet_crossfilter`가 facet 간 교차 관계(`options_by_selection`)를 계산 -
+   예: "시리즈"에서 "초코파이 바나나"를 고르면 "용량"에는 실제로 같이 등장하는 값만 남음
+4. facet을 하나도 못 찾으면 `options.facets`가 빈 배열로 오고, 프론트는 이걸 신호로
+   그대로 `/decide/stream`(빠른 경로)으로 넘어간다
+
+**응답 값 — `ClarifyResponse`**
+
+```json
+{
+  "mode": "clarify",
+  "query": "핸드폰",
+  "options": {
+    "brands": [],
+    "products": [],
+    "volumes": [],
+    "quantities": [],
+    "facets": [
+      {
+        "label": "브랜드",
+        "options": ["삼성전자", "APPLE", "샤오미"],
+        "options_by_selection": null
+      },
+      {
+        "label": "시리즈",
+        "options": ["갤럭시 S25", "아이폰 16"],
+        "options_by_selection": {
+          "삼성전자": ["갤럭시 S25", "갤럭시 Z 폴드"],
+          "APPLE": ["아이폰 16", "아이폰 16 Pro"]
+        }
+      }
+    ]
+  }
+}
+```
+
+- `options.facets[]`가 실제 되묻기 UI가 쓰는 유일한 필드다. `brands`/`products`/`volumes`/
+  `quantities`는 다나와+GPT 고정 4축 시절의 필드로, 지금 백엔드 어디에서도 채우지 않는다
+  (항상 빈 배열) - `ClarifyOptions` 스키마엔 남아있지만 실질적으로 죽은 필드다
+- `options_by_selection`은 해당 facet이 다른 facet의 선택값에 따라 좁혀지는 경우에만
+  채워진다(없으면 `options` 전체가 유효)
+
+#### `POST /ocr/extract` — 이미지에서 검색어 추출(multipart, 필드명 `image`)
+
+**응답 값 — `OcrExtractResponse`**
+
+```json
+{
+  "ocr": {
+    "text": "나이키 에어포스1 07\n129,000원\n무료배송",
+    "confidence": 0.94,
+    "latency_ms": 812,
+    "block_count": 6,
+    "error": null
+  },
+  "cleaned": {
+    "cleaned_text": "나이키 에어포스1 07",
+    "search_query": "나이키 에어포스1",
+    "notes": null,
+    "error": null
+  }
+}
+```
+
+`ocr`은 Google Cloud Vision 원문 추출 결과, `cleaned`는 거기서 가격·바코드·프로모션
+문구를 걷어내고 검색에 바로 쓸 `search_query`만 남긴 Groq 정제 결과(실패 시 `null`,
+프론트는 이때 정제 전 원문 텍스트를 그대로 검색창에 채운다).
+
+#### 그 외 엔드포인트 (요약)
+
+| 엔드포인트 | 인증 | 응답 요약 |
+| --- | --- | --- |
+| `GET /health` | 불필요 | `{"status": "ok"}` - 배포 헬스체크용 |
+| `GET /autocomplete?q=` | 불필요 | 자동완성 문자열 배열(`list[str]`) |
+| `GET /auth/me` | 필요 | 로그인된 `User`(provider · provider_user_id · email · name · picture) |
+| `POST /auth/google` `/auth/kakao` `/auth/naver` | 불필요(로그인 자체) | `AuthResponse` = JWT `token` + `User` |
+| `GET/POST/DELETE /history` | 필요 | `HistoryEntry`(id · query · timestamp · `result`: `DecideResponse`\|과거 형식 유니온) 목록/생성/삭제 |
+| `POST /preferences` | 필요 | 사용자 페르소나 1건 기록(fire-and-forget, `{"status": "ok"}`) |
+| `POST /decide/elevenst-only` | 불필요 | `/decide`와 로직 동일 - 로컬 실험 전용, 프론트는 호출 안 함 |
+
 ### 성능/품질 개선 기록
 
 - 검색 도메인을 다나와로 좁혀 신뢰도 낮은 결과 원천 차단(가격비교 사이트 특성상 여러 판매처를 한 페이지에서 일관된 구조로 비교 가능)
