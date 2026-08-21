@@ -1,4 +1,4 @@
-"""run_elevenst_only_debate의 Groq 검색어 표기 변형 폴백
+"""run_elevenst_only_debate의 HCX 검색어 표기 변형 폴백
 (_search_with_query_variants) 테스트 - "2프로"/"이프로"/"2%"처럼 사용자
 표기와 11번가 카탈로그 표기가 달라 1차 검색이 관련 상품을 하나도 못 찾을
 때만 쓰는 경로다. 네트워크 요청 금지 - 전부 monkeypatch."""
@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 
 from app import debate
-from app.agents import groq
+from app.agents import hcx
 from fetchers.elevenst import ElevenstSearchItem
 
 
@@ -24,11 +24,11 @@ def _item(name: str, price: int, code: str = "1") -> ElevenstSearchItem:
     )
 
 
-def test_search_with_query_variants_returns_empty_when_groq_suggests_nothing(monkeypatch):
+def test_search_with_query_variants_returns_empty_when_hcx_suggests_nothing(monkeypatch):
     async def _fake_variants(query):
         return []
 
-    monkeypatch.setattr(debate.groq, "generate_query_variants", _fake_variants)
+    monkeypatch.setattr(debate.hcx, "generate_query_variants", _fake_variants)
 
     async def _boom_search(query, limit=10):
         raise AssertionError("변형이 없는데 검색이 호출됐다")
@@ -47,7 +47,7 @@ def test_search_with_query_variants_matches_against_the_variant_not_original_que
         assert query == "2프로"
         return ["2%", "이프로"]
 
-    monkeypatch.setattr(debate.groq, "generate_query_variants", _fake_variants)
+    monkeypatch.setattr(debate.hcx, "generate_query_variants", _fake_variants)
 
     async def _fake_search(query, limit=10):
         if query == "2%":
@@ -76,7 +76,7 @@ def test_run_elevenst_only_debate_falls_back_to_query_variants_when_no_relevant_
     async def _fake_variants(query):
         return ["이프로"]
 
-    monkeypatch.setattr(debate.groq, "generate_query_variants", _fake_variants)
+    monkeypatch.setattr(debate.hcx, "generate_query_variants", _fake_variants)
 
     async def _no_embed(texts):
         return None
@@ -102,7 +102,7 @@ def test_run_elevenst_only_debate_still_fails_when_variants_also_find_nothing(mo
     async def _fake_variants(query):
         return ["대안표기"]
 
-    monkeypatch.setattr(debate.groq, "generate_query_variants", _fake_variants)
+    monkeypatch.setattr(debate.hcx, "generate_query_variants", _fake_variants)
 
     try:
         asyncio.run(debate.run_elevenst_only_debate("무관한질의"))
@@ -112,6 +112,6 @@ def test_run_elevenst_only_debate_still_fails_when_variants_also_find_nothing(mo
 
 
 def test_generate_query_variants_returns_empty_when_key_missing(monkeypatch):
-    monkeypatch.setattr("app.config.settings.groq_api_key", None)
+    monkeypatch.setattr("app.config.settings.hcx_api_key", None)
 
-    assert asyncio.run(groq.generate_query_variants("2프로")) == []
+    assert asyncio.run(hcx.generate_query_variants("2프로")) == []

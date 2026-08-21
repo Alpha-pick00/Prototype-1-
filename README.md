@@ -18,7 +18,7 @@ alpha-pick-jet.vercel.app
 > 랭킹 + LLM 최종 선택) → 최종 추천의 단순한 선형 파이프라인이다. Human-in-the-loop은
 > 텍스트 재검색 대신 구조적 로컬 필터링으로 후보군을 좁혀나가고(카테고리 축은 11번가가
 > 카테고리 필터 자체를 지원하지 않아 되묻지 않음), 검색어 표기가 카탈로그와 다를 때만
-> (예: "2프로"↔"이프로") Groq이 대안 표기를 제안해 재검색한다. 자세한 배경은
+> (예: "2프로"↔"이프로") HCX가 대안 표기를 제안해 재검색한다. 자세한 배경은
 > [주요 의사결정 사항](#주요-의사결정-사항) 참고.
 
 ```mermaid
@@ -32,7 +32,6 @@ flowchart LR
     subgraph BE["Backend · FastAPI (AWS)"]
         DECIDE["POST /decide/stream<br/>(메인 검색 흐름)"]
         CLARIFYF["POST /decide/clarify<br/>(AI 상세검색 · facet)"]
-        CHAT["POST /clarify/ask<br/>(대화형 봇 질문 생성)"]
         OCR["POST /ocr/extract"]
         AUTH["/auth/*"]
         HIST["/history"]
@@ -42,7 +41,7 @@ flowchart LR
     subgraph CORE["run_elevenst_only_debate(app/debate.py)"]
         SEARCH11["11번가 검색<br/>(base_query 있으면 구조적 필터, 없으면 직접 검색)"]
         VERIFY["관련성 검증<br/>(_product_name_matches)"]
-        VARIANT["검색 실패 시 표기 변형 재검색<br/>(Groq, '2프로'↔'이프로' 등)"]
+        VARIANT["검색 실패 시 표기 변형 재검색<br/>(HCX, '2프로'↔'이프로' 등)"]
         RANK["관련도 랭킹<br/>(Qwen 임베딩 코사인 유사도)"]
         RECOMMEND["추천 Agent<br/>(Qwen - 가격·리뷰·구매만족도 종합)"]
     end
@@ -56,8 +55,9 @@ flowchart LR
 
     subgraph EXT["외부 서비스"]
         ELEVENST["11번가 오픈 API<br/>(ProductSearch · Categories)"]
-        QWEN["Qwen(DashScope)<br/>임베딩 · 추천 Agent · clarify 질문 생성"]
-        GROQ["Groq<br/>검색어 표기 변형 · OCR 정제"]
+        QWEN["Qwen(DashScope)<br/>임베딩 · 추천 Agent"]
+        HCX["HCX(HyperCLOVA X)<br/>검색어 표기 변형"]
+        GROQ["Groq<br/>OCR 정제"]
         DEEPSEEKAI["DeepSeek<br/>facet 추출"]
         VISION["Google Vision OCR"]
         OAUTH["Google · Kakao · Naver"]
@@ -68,7 +68,6 @@ flowchart LR
     GCI --> CTX
     CTX --> DECIDE
     CTX --> CLARIFYF
-    GCI --> CHAT
     GCI --> OCR
     SB --> AUTH
     SB --> HIST
@@ -77,7 +76,7 @@ flowchart LR
     VERIFY -- "관련 상품 0건" --> VARIANT --> VERIFY
     VERIFY -- "검증된 후보군" --> RANK --> RECOMMEND
     SEARCH11 --> ELEVENST
-    VARIANT --> GROQ
+    VARIANT --> HCX
     RANK --> QWEN
     RECOMMEND --> QWEN
     RECOMMEND -- 최종 추천 --> DECIDE
@@ -87,7 +86,6 @@ flowchart LR
     CFSEARCH --> CFEXTRACT --> DEEPSEEKAI
     CFEXTRACT <-.-> LLMCACHE
     CFEXTRACT -- facets --> CLARIFYF
-    CHAT --> QWEN
 
     OCR --> VISION
     OCR --> GROQ
@@ -105,8 +103,8 @@ flowchart LR
 | 검색 | 11번가 오픈 API(ProductSearch · Categories) - 1st-party 구조화 데이터, 스크래핑 없음 |
 | 관련성 검증 | rapidfuzz 토큰 유사도 + 모델/규격 토큰 충돌 가드 + 상호배타 토큰 가드(`_product_name_matches`) - 검색어와 실제로 일치하는 상품만 후보로 인정 |
 | 추천 Agent | Qwen(DashScope) 임베딩(`text-embedding-v3`)으로 후보를 관련도순 정렬 → Qwen이 가격·리뷰·구매만족도를 종합해 최종 추천 선택(실패 시 최저가 규칙 기반 폴백) |
-| 검색어 표기 변형 | Groq(GPT-OSS) - 1차 검색이 관련 상품을 못 찾으면 카탈로그 표기 차이(예: "2프로"↔"이프로"↔"2%")를 추론해 대안 표기로 재검색 |
-| Human-in-the-loop | DeepSeek가 11번가 검색 상품명 목록에서 facet(라벨 자유, 상호 교차 필터링)을 추출. 카테고리 축은 되묻지 않고(11번가가 카테고리 필터 미지원), 드릴다운 후속 턴은 재검색 대신 순수 로컬 필터링으로 후보군을 좁힘. 되묻는 질문 문장은 Qwen이 실시간 생성(`/clarify/ask`) |
+| 검색어 표기 변형 | HCX(HyperCLOVA X, HCX-DASH-002) - 1차 검색이 관련 상품을 못 찾으면 카탈로그 표기 차이(예: "2프로"↔"이프로"↔"2%")를 추론해 대안 표기로 재검색 |
+| Human-in-the-loop | DeepSeek가 11번가 검색 상품명 목록에서 facet(라벨 자유, 상호 교차 필터링)을 추출. 카테고리 축은 되묻지 않고(11번가가 카테고리 필터 미지원), 드릴다운 후속 턴은 재검색 대신 순수 로컬 필터링으로 후보군을 좁힘 |
 | LLM 응답 캐시 | Supabase(Postgres + pgvector) 기반 KV(완전 일치) + 시맨틱(임베딩 유사도) 2단 캐시 - 선택적, 미설정 시 안전하게 no-op |
 | 이미지 인식 | Google Cloud Vision (텍스트 추출) → Groq (정제 · 검색어 추출) |
 | 인증 | Google / Kakao / Naver OAuth2 + JWT 기반 세션 |
@@ -127,10 +125,47 @@ flowchart LR
 
 | 팀원 | 주요 역할 |
 | --- | --- |
-| parkminsung45 | 백엔드 멀티에이전트 토론 엔진, 검색 품질(Tavily 연동/필터링), 소셜 로그인, 배포(AWS/Docker/nginx), 프론트엔드 UI/UX 전반 |
-| tmdals3000 | 검색어 자동완성(cold-start) 기능, 멀티턴 대화 기능 |
-| lou0-ux | OCR 텍스트 추출 파이프라인(Google Vision + Groq 정제) |
-| Seojeong Woo | 서버 인스턴스 관리 , 데이터베이스 구축, 리서치 |
+| parkminsung45 (박민성) | 백엔드 아키텍처·검색/추천 엔진 설계, 배포/인프라, 소셜 로그인, 저장소 거버넌스, 프론트엔드 UI/UX 전반 |
+| tmdals3000 (이승민) | 검색 후보 매칭·비용 최적화, AI 상세검색(멀티턴 clarify), 대화형 채팅 UI |
+| lou0-ux | OCR 파이프라인, 검색 품질 안정화 |
+| Seojeong Woo (우서정) | 서버 인스턴스 관리, 데이터베이스 구축, 모델 설정 트러블슈팅 |
+
+아래는 각 팀원의 주요 기여를 시간순이 아닌 영역별로 정리한 것이다(커밋 이력 기준 - 자세한 배경/트러블슈팅은 각각 아래 시간순 변경 이력·문제 해결 내역·성능 개선 기록 절 참고).
+
+#### parkminsung45 (박민성) — 백엔드 아키텍처 · 인프라 · 풀스택
+
+- 검색/추천 파이프라인을 프로젝트 전 기간에 걸쳐 세 차례 근본적으로 재설계: (1) Gemini/Claude 기반 멀티에이전트 토론 엔진 최초 구축, (2) 역할 분리형 Google ADK 파이프라인 + HITL(Human-in-the-loop) 되묻기 + 시맨틱 검색 캐시 도입, (3) 다나와 스크래핑 + Tavily 검색 + ADK 멀티에이전트 디베이트를 전량 제거하고 11번가 오픈 API(ProductSearch) 기반 단일 파이프라인으로 전면 재구축
+- 추천 Agent(임베딩 코사인 유사도 관련도 랭킹 + LLM 최종 선택, 실패 시 최저가 규칙 폴백) 설계·구현
+- HITL 되묻기 흐름을 "질의 재구성 후 재검색" 방식에서 "구조적 로컬 필터링" 방식으로 재설계해 중복 검색 비용 제거
+- Google/Kakao/Naver 소셜 로그인(OAuth) 백엔드·프론트엔드 전체 구현
+- AWS EC2 + Docker + nginx/TLS 백엔드 배포, GitHub Pages/Vercel 프론트엔드 배포 파이프라인 구축 및 CORS·도메인·인증서·IP 차단 우회 등 배포 인시던트 다수 트러블슈팅
+- LLM 프로바이더 다중화 관리: OpenAI → Gemini/Claude → Groq → Qwen/DeepSeek/HCX로 이어지는 모델 슬롯 교체·비용/속도 튜닝(예: Qwen thinking mode 비활성화로 응답 지연 20~95초 → 2~5초 단축)
+- GitHub 저장소 거버넌스 구성: 브랜치 보호 규칙(main 최소 1인 승인 필수) 및 Repository Ruleset 설계·트러블슈팅
+- 대규모 죽은 코드 정리를 여러 차례 주도(사용되지 않는 브랜드 단축검색/대량구매 생성 경로, 고정 축 clarify UI 등을 코드 추적을 통해 직접 발굴 후 제거) 및 README 아키텍처 문서 지속 갱신
+
+#### tmdals3000 (이승민) — 검색 정확도 · 비용 최적화 · 대화형 UX
+
+- 검색어 자동완성(cold-start) 기능 구현
+- 다나와 어댑터(판매자별 가격표 파싱, 아웃링크 해석) 설계, 다나와 후보를 1급 심사 후보로 승격시키는 로직 구현 - 이후 다나와 폐기·11번가 전환 작업에도 참여
+- 후보 매칭 정확도 개선: 사양 표기 차이로 인한 오매칭을 막는 계열(family) 기반 가드 설계, 부당하게 배제되던 G마켓/옥션 판매처 포함, exclusive-token 가드로 동일 단어·다른 상품 오매칭 방지
+- LLM 비용/응답속도 최적화 주도: propose 단계 LLM 호출을 3개에서 조건부 1개로 축소, 그라운딩을 순차 게이트 구조로 재구성, 비상품 잡담·짧은 검색어를 LLM 호출 전에 걸러내는 fast-fail 로직 추가
+- AI 상세검색(멀티턴 facet 되묻기) 기능을 설계하고 11번가 전환 이후에도 지속 개선(facet 자동 제출, 대화체 질의 정제, 드릴다운 검색어 정리)
+- 채팅형 UI(메시지 타임스탬프, 재시도, 수정 기능) 구현
+- 오프라인 100개 질의 셋 기반 회귀/커버리지 측정 하네스 구축 및 그라운딩 채점 로직 분리(자세한 수치는 [그라운딩 회귀 실험 기록](#그라운딩-회귀-실험-기록) 참고)
+
+#### lou0-ux — OCR 파이프라인 · 검색 품질 안정화
+
+- Google Cloud Vision 기반 OCR 텍스트 추출 파이프라인 최초 구현(이후 정제 모델이 Gemini → Groq로 교체되는 과정에서도 파이프라인 유지보수)
+- OCR 정제 실패 시 규칙 기반 폴백 체인 설계, 파이프라인 에러 처리 안정성 개선
+- 핸드폰 케이스 등 액세서리 카테고리에서 무관한 상품이 섞이는 검색 품질 문제 수정
+- AI 상세검색이 이미 질의에 포함된 값을 다시 facet으로 되묻는 중복 질문 버그 수정
+- 대량구매 검색 경로 안정성 개선
+- 최종 결과 카드 UX 실험("다른 관점에서 보기" 칩) 및 11번가 오픈 API 스모크 테스트 스크립트 작성
+
+#### Seojeong Woo (우서정) — 인프라 · 모델 설정 관리
+
+- 서버 인스턴스 관리, 데이터베이스 구축 및 기술 리서치
+- Groq 모델 기본값 설정 오류 수정, 불필요한 LLM 재시도 로직 제거로 응답 지연시간 단축
 
 ### 시간순 변경 이력
 
@@ -153,6 +188,7 @@ flowchart LR
 | 2026-08-18 | 배포 터널 재소진 + 구 GitHub Pages URL 404 확인 후 터널 재기동·`VITE_API_URL` 갱신·재배포로 복구 · "gemini" 슬롯 기본 Groq 모델을 llama-3.3-70b-versatile → gpt-oss-20b로 교체 · 프론트엔드를 Vercel에도 배포하고 백엔드를 기존 AWS 인스턴스에 최신 코드로 재배포(저장소 재동기화, nginx+TLS를 새 인스턴스 IP로 재발급), CORS에 Vercel 도메인 추가 |
 | 2026-08-19 | 취향 주도 카테고리(패션의류/잡화 등)에 스타일 가이드 응답 모드 추가(검증된 후보를 스타일별로 그룹핑) · 토큰 사용량 최적화(clarify facet 추출 가드, classify_category 모델 재배정) · 저장소 전반 죽은 코드/미사용 설정·의존성 정리(백엔드·프론트엔드) · README 정리 |
 | 2026-08-20 | **다나와 스크래핑 + Tavily 검색 + Google ADK 멀티에이전트 디베이트 파이프라인 전체 제거, 11번가 오픈 API(ProductSearch) 하나로 통일**(현재 아키텍처의 골격) · 추천 Agent 추가(Qwen 임베딩 관련도 랭킹 + LLM 최종 선택, 실패 시 최저가 폴백) · HITL을 쿼리 재구성 재검색 방식에서 구조적 로컬 필터링으로 재설계(카테고리 축은 11번가가 필터 미지원이라 되묻지 않음) · Supabase 기반 LLM 응답 캐시(KV+시맨틱) 스캐폴딩 · Qwen "thinking mode" 비활성화로 응답 지연 20~95초 → 2~5초 단축 · Groq 기반 검색어 표기 변형 폴백 추가("2프로"/"이프로"/"2%" 매핑) · GitHub 브랜치 보호 규칙 추가(main은 최소 1인 승인 필수) |
+| 2026-08-21 | 브랜드 단축검색/대량구매 생성 경로 + 고정 4축 clarify UI(`FixedAxisClarifyCard`) + 미사용 `skip_intent_check` 요청 필드 제거 · README 팀원 구성 절을 커밋 이력 기반 상세 기여 목록으로 확장(개인 포트폴리오용) · 검색어 표기 변형 폴백을 Groq에서 HCX(HyperCLOVA X, `HCX-DASH-002`)로 교체 |
 
 ### 주요 의사결정 사항
 
@@ -193,6 +229,8 @@ flowchart LR
 - **Groq 기반 검색어 표기 변형 폴백**: 11번가 검색 엔진이 사용자 표기("2프로")와 카탈로그 표기("이프로"/"2%")가 달라 관련 상품을 하나도 못 찾는 경우가 있음을 실측 확인 - 1차 검색 실패 시에만 Groq이 대안 표기를 제안해 재검색(관련성 판정도 원래 질의가 아니라 변형 표기 기준)
 - **Supabase 기반 LLM 응답 캐시 스캐폴딩**: KV(완전 일치)+시맨틱(임베딩 유사도) 2단 캐시를 facet 추출(호출당 최대 8회 LLM 호출 가능)에 배선 - `SUPABASE_URL`/`SUPABASE_KEY` 미설정 시 안전하게 no-op
 - **GitHub 브랜치 보호 규칙 추가**: `main`에 최소 1인 승인 필수 + 승인 후 새 커밋 시 재승인 필요(dismiss stale reviews) + 직접 push/force-push/삭제 차단 - 이후 작업은 브랜치 생성 → PR → 리뷰 승인 → 머지 순서로 진행
+- **브랜드 단축검색/대량구매 생성 경로 및 고정 4축 clarify UI 제거**: `check_clarify_facets`(facet 추출)가 `brands`/`products`/`volumes`/`quantities`를 채우지 않게 되며 두 기능(브랜드로 바로 검색하는 단축 경로, 고정 4축 UI `FixedAxisClarifyCard`)이 조용히 죽은 코드가 돼있던 것을 발견 - 새로 생성하는 경로만 프론트/백엔드 양쪽에서 제거하고, 과거 저장된 히스토리에 남아있을 수 있는 표시 경로·타입은 하위호환을 위해 유지. 같은 조사 과정에서 백엔드가 더 이상 읽지 않던 `skip_intent_check` 요청 필드도 함께 제거(프론트의 로컬 되묻기 게이팅 용도는 유지)
+- **검색어 표기 변형 폴백을 Groq에서 HCX(HyperCLOVA X)로 교체**: 한국어 표기 변형 추론(예: "2프로"↔"이프로"↔"2%")은 한국어 특화 모델이 유리하다고 판단해 교체. CLOVA Studio의 OpenAI 호환 엔드포인트(`HCX-DASH-002`)를 그대로 사용하되, `response_format`의 `json_object` 모드를 지원하지 않아 프롬프트 지시 + 정규식 파싱으로 대체. OCR 정제(`app/ocr/cleanup.py`)는 별개 기능이라 Groq를 그대로 유지
 
 ### 문제 해결 내역 (Troubleshooting)
 
@@ -215,6 +253,7 @@ flowchart LR
 - **OCR 정제/카테고리분류/propose "gemini" 슬롯이 전부 404로 실패**: Groq가 `llama-3.3-70b-versatile`을 무료 티어에서 서비스 종료 → `gpt-oss-20b`로 교체. 이후 refine과 예산을 나눠 쓰며 더 빨리 소진되는 게 확인돼 `gpt-oss-120b`로 재조정
 - **AWS 재배포 직후 실제 검색이 전부 실패**: Tavily가 플랜 한도 초과(432) 반환 → 새 키로 교체, 로컬/AWS 양쪽 `.env` 갱신
 - **Vercel GitHub 연동 프리뷰 빌드가 매번 실패**: Root Directory 설정이 비어 있어 리포 루트에서 빌드 시도 → Vercel API로 `rootDirectory: "frontend"` 설정
+- **HCX API 키가 401로 거부됨**: CLOVA Studio 콘솔에서 발급받은 키가 구버전(테스트/서비스 앱) 형식이었음 - OpenAI 호환 엔드포인트(`/v1/openai`)는 `nv-`로 시작하는 신버전 키만 받는다("Invalid Key - Please use new API Key that starts with 'nv-*'") → `nv-`로 시작하는 키로 재발급받아 해결. 두 발급 체계가 다르다는 점이 문서에 명시돼 있지 않아 처음엔 원인 파악에 혼선
 
 ---
 
@@ -229,7 +268,7 @@ flowchart LR
 ### 전처리(검색 결과 정제) 방법
 
 - 관련성 검증(`_product_name_matches`): 토큰 유사도(rapidfuzz) + 모델/규격 토큰 충돌 가드 + 상호배타 토큰 가드 3단 - 검색어와 실제로 같은 상품인지 확인된 후보만 남김
-- 검색어 표기가 카탈로그와 달라(예: "2프로") 1차 검색이 관련 상품을 하나도 못 찾으면, Groq이 대안 표기를 제안해 재검색
+- 검색어 표기가 카탈로그와 달라(예: "2프로") 1차 검색이 관련 상품을 하나도 못 찾으면, HCX가 대안 표기를 제안해 재검색
 - OCR 원문에서 가격/바코드/프로모션 문구를 제거하고 상품명·용량 등 핵심 메타데이터만 남기는 Groq 정제 단계(`search_query` 추출)
 
 ### 평가 기준 (무엇으로 "좋은 답"을 판단할지)
@@ -250,7 +289,7 @@ sequenceDiagram
     participant CTX as SearchContext.runTurn
     participant B as 백엔드(run_elevenst_only_debate)
     participant E as 11번가 오픈 API
-    participant G as Groq
+    participant H as HCX
     participant Q as Qwen
 
     U->>CTX: 검색어 입력(첫 턴)
@@ -259,8 +298,8 @@ sequenceDiagram
     E-->>B: 검색 결과
     B->>B: 관련성 검증(_product_name_matches)
     alt 관련 상품 0건(카탈로그 표기가 다름 - 예: "2프로")
-        B->>G: 대안 표기 제안 요청
-        G-->>B: 변형 표기 목록(예: "이프로", "2%")
+        B->>H: 대안 표기 제안 요청
+        H-->>B: 변형 표기 목록(예: "이프로", "2%")
         B->>E: 변형 표기로 재검색
         E-->>B: 검색 결과
     end
@@ -277,6 +316,174 @@ sequenceDiagram
 후속 턴(`base_query`가 있는 턴)은 매번 재검색하는 대신 `base_query`로 한 번만 검색한
 결과를 로컬 필터링(`_filter_items_by_extra_terms`)으로 좁혀나간다. facet을 못 찾으면
 그대로 `/decide/stream` 경로로 넘어간다.
+
+### API 상세 명세 (요청 → 내부 플로우 → 응답 값)
+
+`backend/app/schemas.py`(Pydantic 모델) 기준 실제 필드. 코드가 바뀌면 이 절도 같이
+갱신해야 한다 - 아래는 2026-08-21 기준.
+
+#### `POST /decide/stream` — 메인 검색(NDJSON 스트리밍, 프론트가 실제로 쓰는 경로)
+
+**요청** (`DecideRequest`, 이 엔드포인트가 쓰는 필드만)
+
+| 필드 | 타입 | 의미 |
+| --- | --- | --- |
+| `query` | `str` | 검색어(필수) |
+| `base_query` | `str \| null` | 드릴다운 후속 턴이면 그 체인의 첫 검색어(구조적 로컬 필터링용, 없으면 매번 새로 검색) |
+
+**내부 플로우** (`app.debate.run_elevenst_only_debate_stream` → `run_elevenst_only_debate`)
+
+1. `status` 이벤트 즉시 전송 → 프론트가 "11번가에서 검색하고 있습니다" 표시
+2. `_search_candidates`: `base_query`가 있으면 그걸로 90개 검색 후 로컬 필터링, 없으면 `query`로 10개 직접 검색(11번가 `ProductSearch`)
+3. `_product_name_matches`(rapidfuzz 토큰 유사도 + 모델/규격 충돌 가드 + 상호배타 토큰 가드)로 관련 없는 결과 제거 - 0건이면 `_search_with_query_variants`가 HCX에게 대안 표기를 물어 재검색
+4. 그래도 0건이면 `RuntimeError` → `error` 이벤트로 스트리밍되고 흐름 종료
+5. 검증된 후보를 Qwen 임베딩(`text-embedding-v3`) 코사인 유사도로 관련도순 정렬(`_rank_by_relevance`) → 이 순서 그대로가 응답의 `proposals`
+6. `gpt.recommend_best`(실제 호출 모델은 Qwen)가 가격·리뷰 수·구매만족도를 보고 최종 index 선택 → 실패(키 없음/API 오류/응답 파싱 실패)하면 최저가 규칙 기반으로 폴백
+7. `final` 이벤트로 완성된 `DecideResponse` 전체를 한 번에 전송
+
+**스트리밍 이벤트** (한 줄에 JSON 객체 하나, `\n`으로 구분 - `application/x-ndjson`)
+
+| `type` | 페이로드 | 시점 |
+| --- | --- | --- |
+| `status` | `{"stage": "searching"}` | 흐름 시작 직후 1회 |
+| `final` | `{"result": DecideResponse}` | 성공 종료 시 1회(아래 응답 값 참고) |
+| `error` | `{"message": str}` | 검증된 후보를 끝내 못 찾거나 예외 발생 시 |
+
+**응답 값 — `DecideResponse`** (`final` 이벤트의 `result`, `/decide`의 응답 본문과 동일)
+
+```json
+{
+  "mode": "single",
+  "query": "나이키 에어포스1",
+  "proposals": [
+    {
+      "agent": "elevenst",
+      "product_name": "나이키 에어포스 1 07 화이트",
+      "price": "129,000원",
+      "retailer": "나이키공식스토어",
+      "url": "https://www.11st.co.kr/products/1234567",
+      "reasoning": "11번가 오픈 API 검증 결과 (관련도순 - 함께 볼만한 상품)",
+      "error": null,
+      "verified": true,
+      "challenge_note": null,
+      "proposed_by": null
+    }
+  ],
+  "decision": {
+    "product_name": "나이키 에어포스 1 07 화이트",
+    "price": "129,000원",
+    "retailer": "나이키공식스토어",
+    "url": "https://www.11st.co.kr/products/1234567",
+    "reasoning": "11번가 실측 검증 후보 중 추천 Agent(Qwen)가 선택 - 가격과 리뷰 수 모두 우수합니다",
+    "chosen_agent": "elevenst",
+    "price_source": "elevenst_offer",
+    "verified": null
+  },
+  "price_table": null,
+  "style_guide": null
+}
+```
+
+- `proposals[]`: 검증 통과한 후보 전부, 관련도순 - "함께 볼만한 상품" 목록으로 그대로 노출됨. 이 경로에서는 `agent`가 항상 `"elevenst"`, `verified`가 항상 `true`(1st-party 구조화 데이터라 조회된 것 자체가 검증). `error` · `challenge_note` · `proposed_by`는 옛 다나와/ADK 멀티에이전트 시절 필드라 이 경로에서는 항상 `null`(스키마 하위 호환용으로 유지 - `HistoryEntry`에 저장된 과거 기록이 이 필드들을 쓸 수 있어서 타입만 남겨둠)
+- `decision`: 최종 추천 1건. `price_source`는 항상 `"elevenst_offer"`(11번가 실측가 그대로, LLM 추정 아님). `chosen_agent`는 항상 `"elevenst"`. **`verified` 필드는 현재 항상 `null`** - 다나와/ADK 시절의 challenge 교차검증 단계가 11번가 전환과 함께 제거되면서 이 필드를 채우는 코드가 없다(스키마엔 남아있지만 현재 파이프라인에서는 죽은 값 - 관련도 검증 자체는 `proposals` 진입 전에 이미 규칙 기반으로 끝났으므로 별도 challenge 없이도 안전함)
+- `price_table` · `style_guide`: 각각 다나와 가격표 시절, 취향 주도 카테고리(패션 등) 전용 필드 - 메인 검색 흐름에서는 항상 `null`
+
+#### `POST /decide` — 위와 동일한 로직, 스트리밍 없이 완성된 `DecideResponse` 하나만 반환
+
+내부적으로 `run_elevenst_only_debate`를 직접 호출(스트리밍 래퍼만 없음). 응답 본문은 위
+`DecideResponse` 예시와 완전히 동일. 프론트는 로딩 UX 때문에 이 엔드포인트 대신 항상
+`/decide/stream`을 쓴다.
+
+#### `POST /decide/clarify` — AI 상세검색(멀티턴 facet 되묻기)
+
+**요청**: `DecideRequest`와 동일(`session_preferences`도 여기서만 실제로 쓰인다 - 로그인
+계정의 영구 선호도와 병합해 facet 옵션 순서에 반영)
+
+**내부 플로우** (`app.debate.check_clarify_facets`)
+
+1. 정적 facet 캐시(정규식 매칭)에서 먼저 찾아보고, 없으면 11번가에서 `base_query`(또는
+   `query`)로 90개 검색
+2. DeepSeek(`extract_facets_from_names`)이 검색된 상품명 목록에서 라벨 자유형 facet
+   (브랜드/시리즈/용량 등)을 추출 - 브랜드가 여러 개면 `_enrich_facets_per_brand`가
+   브랜드별로 병렬 재호출해 시리즈/모델처럼 특정 브랜드에 치우치기 쉬운 축을 보강
+3. `_attach_facet_crossfilter`가 facet 간 교차 관계(`options_by_selection`)를 계산 -
+   예: "시리즈"에서 "초코파이 바나나"를 고르면 "용량"에는 실제로 같이 등장하는 값만 남음
+4. facet을 하나도 못 찾으면 `options.facets`가 빈 배열로 오고, 프론트는 이걸 신호로
+   그대로 `/decide/stream`(빠른 경로)으로 넘어간다
+
+**응답 값 — `ClarifyResponse`**
+
+```json
+{
+  "mode": "clarify",
+  "query": "핸드폰",
+  "options": {
+    "brands": [],
+    "products": [],
+    "volumes": [],
+    "quantities": [],
+    "facets": [
+      {
+        "label": "브랜드",
+        "options": ["삼성전자", "APPLE", "샤오미"],
+        "options_by_selection": null
+      },
+      {
+        "label": "시리즈",
+        "options": ["갤럭시 S25", "아이폰 16"],
+        "options_by_selection": {
+          "삼성전자": ["갤럭시 S25", "갤럭시 Z 폴드"],
+          "APPLE": ["아이폰 16", "아이폰 16 Pro"]
+        }
+      }
+    ]
+  }
+}
+```
+
+- `options.facets[]`가 실제 되묻기 UI가 쓰는 유일한 필드다. `brands`/`products`/`volumes`/
+  `quantities`는 다나와+GPT 고정 4축 시절의 필드로, 지금 백엔드 어디에서도 채우지 않는다
+  (항상 빈 배열) - `ClarifyOptions` 스키마엔 남아있지만 실질적으로 죽은 필드다
+- `options_by_selection`은 해당 facet이 다른 facet의 선택값에 따라 좁혀지는 경우에만
+  채워진다(없으면 `options` 전체가 유효)
+
+#### `POST /ocr/extract` — 이미지에서 검색어 추출(multipart, 필드명 `image`)
+
+**응답 값 — `OcrExtractResponse`**
+
+```json
+{
+  "ocr": {
+    "text": "나이키 에어포스1 07\n129,000원\n무료배송",
+    "confidence": 0.94,
+    "latency_ms": 812,
+    "block_count": 6,
+    "error": null
+  },
+  "cleaned": {
+    "cleaned_text": "나이키 에어포스1 07",
+    "search_query": "나이키 에어포스1",
+    "notes": null,
+    "error": null
+  }
+}
+```
+
+`ocr`은 Google Cloud Vision 원문 추출 결과, `cleaned`는 거기서 가격·바코드·프로모션
+문구를 걷어내고 검색에 바로 쓸 `search_query`만 남긴 Groq 정제 결과(실패 시 `null`,
+프론트는 이때 정제 전 원문 텍스트를 그대로 검색창에 채운다).
+
+#### 그 외 엔드포인트 (요약)
+
+| 엔드포인트 | 인증 | 응답 요약 |
+| --- | --- | --- |
+| `GET /health` | 불필요 | `{"status": "ok"}` - 배포 헬스체크용 |
+| `GET /autocomplete?q=` | 불필요 | 자동완성 문자열 배열(`list[str]`) |
+| `GET /auth/me` | 필요 | 로그인된 `User`(provider · provider_user_id · email · name · picture) |
+| `POST /auth/google` `/auth/kakao` `/auth/naver` | 불필요(로그인 자체) | `AuthResponse` = JWT `token` + `User` |
+| `GET/POST/DELETE /history` | 필요 | `HistoryEntry`(id · query · timestamp · `result`: `DecideResponse`\|과거 형식 유니온) 목록/생성/삭제 |
+| `POST /preferences` | 필요 | 사용자 페르소나 1건 기록(fire-and-forget, `{"status": "ok"}`) |
+| `POST /decide/elevenst-only` | 불필요 | `/decide`와 로직 동일 - 로컬 실험 전용, 프론트는 호출 안 함 |
 
 ### 성능/품질 개선 기록
 
@@ -336,5 +543,4 @@ xychart-beta
 - 검색 범위가 11번가 하나뿐 - 다른 오픈마켓도 구조화 API를 제공하면 같은 패턴(`fetchers/elevenst.py`)으로 확장 가능
 - 11번가 오픈 API가 카테고리 코드 필터를 지원하지 않아(dispCtgrNo를 줘도 결과가 안 바뀜을 실측 확인), AI 상세검색의 카테고리 축은 사용자에게 되묻지 않고 표본을 좁히는 데도 안 씀 - 다른 축(브랜드/모델/용량)만으로 좁혀나감
 - Supabase 기반 LLM 응답 캐시(`app/llm_cache.py`)는 스키마(`supabase/llm_cache.sql`)와 코드는 준비돼 있지만 실제 프로젝트 secret key가 아직 없어 비활성 상태(no-op) - 연결하면 별도 배포 작업 없이 바로 켜짐
-- Groq 검색어 표기 변형 재검색(`app/agents/groq.py::generate_query_variants`)은 1차 검색 실패 시에만 타는 폴백이라 평소 검색 속도에는 영향 없지만, 그 경로 자체는 추가 LLM 호출 + 재검색으로 몇 초 더 걸림
-- 프론트엔드의 `FixedAxisClarifyCard`(브랜드/제품/용량/개수 고정 축 UI)는 이제 아무 데이터도 안 받는 죽은 코드 경로 - 백엔드가 그 필드(`brands`/`products`/`volumes`/`quantities`)를 더 이상 채우지 않음, 정리는 후속 과제
+- HCX 검색어 표기 변형 재검색(`app/agents/hcx.py::generate_query_variants`)은 1차 검색 실패 시에만 타는 폴백이라 평소 검색 속도에는 영향 없지만, 그 경로 자체는 추가 LLM 호출 + 재검색으로 몇 초 더 걸림

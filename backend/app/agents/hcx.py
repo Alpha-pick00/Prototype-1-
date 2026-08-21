@@ -1,11 +1,17 @@
-"""Groq 전용 - 검색어 표기 변형 생성(2026-08-20, "2프로랑 2%랑 이프로랑 다
-똑같은 제품인데 상품 매핑이 안되는 문제를 Groq을 통한 프롬프팅을 통해
-해결해줘"). 11번가 검색 엔진이 사용자가 흔히 쓰는 표기("2프로")와 실제
-카탈로그 표기("이프로"/"2%")가 달라 관련 상품을 하나도 못 찾는 경우가
-있다(실측 확인 - "2프로"로 검색하면 카메라 삼각대·어댑터 같은 완전히
-무관한 "프로"(Pro) 매칭 결과만 나온다) - 1차 검색이 관련 상품을 하나도
+"""HCX(HyperCLOVA X, CLOVA Studio) 전용 - 검색어 표기 변형 생성(2026-08-20,
+"2프로랑 2%랑 이프로랑 다 똑같은 제품인데 상품 매핑이 안되는 문제를 프롬프팅을
+통해 해결해줘" - 이후 2026-08-21 Groq에서 HCX로 교체, 한국어 표기 변형 추론은
+한국어 특화 모델이 더 유리하다고 판단). 11번가 검색 엔진이 사용자가 흔히 쓰는
+표기("2프로")와 실제 카탈로그 표기("이프로"/"2%")가 달라 관련 상품을 하나도 못
+찾는 경우가 있다(실측 확인 - "2프로"로 검색하면 카메라 삼각대·어댑터 같은
+완전히 무관한 "프로"(Pro) 매칭 결과만 나온다) - 1차 검색이 관련 상품을 하나도
 못 찾았을 때만(app.debate.run_elevenst_only_debate) 이 함수로 대안 표기를
-만들어 재검색한다."""
+만들어 재검색한다.
+
+CLOVA Studio의 OpenAI 호환 엔드포인트(v1/openai)는 response_format의
+json_object 모드를 지원하지 않는다(json_schema만 지원) - 그래서 여기서는
+response_format을 아예 안 주고, 프롬프트 지시 + parse_json_object의 정규식
+추출로 JSON을 뽑아낸다."""
 
 from __future__ import annotations
 
@@ -21,13 +27,14 @@ QUERY_VARIANT_INSTRUCTIONS = (
     "이 검색어와 정확히 같은 상품을 가리키는 대안 표기를 최대 3개까지 "
     "제안하세요 - 다른 상품이나 브랜드를 제안하지 마세요, 표기만 다를 뿐 "
     "같은 것이어야 합니다. 확신이 없으면 빈 배열을 반환하세요. "
-    "반드시 아래 JSON 형식으로만 답하세요. 다른 텍스트를 덧붙이지 마세요.\n\n"
+    "반드시 아래 JSON 형식으로만 답하세요. 다른 텍스트나 코드펜스를 덧붙이지 "
+    "마세요.\n\n"
     '{"variants": ["...", "..."]}'
 )
 
 
 def _client() -> AsyncOpenAI:
-    return AsyncOpenAI(api_key=settings.groq_api_key, base_url=settings.groq_api_base, max_retries=0)
+    return AsyncOpenAI(api_key=settings.hcx_api_key, base_url=settings.hcx_api_base, max_retries=0)
 
 
 def build_query_variant_prompt(query: str) -> str:
@@ -37,14 +44,13 @@ def build_query_variant_prompt(query: str) -> str:
 async def generate_query_variants(query: str) -> list[str]:
     """실패(키 없음·API 오류·JSON 파싱 실패)하면 빈 리스트 - 호출부가 원래
     검색 결과 없음으로 그대로 처리한다."""
-    if not settings.groq_api_key:
+    if not settings.hcx_api_key:
         return []
     try:
         client = _client()
         response = await client.chat.completions.create(
-            model=settings.groq_model,
+            model=settings.hcx_model,
             messages=[{"role": "user", "content": build_query_variant_prompt(query)}],
-            response_format={"type": "json_object"},
         )
         data = parse_json_object(response.choices[0].message.content or "")
         variants = data.get("variants") or []
