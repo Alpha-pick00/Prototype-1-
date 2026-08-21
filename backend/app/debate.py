@@ -12,8 +12,6 @@ from . import price_table as price_table_module
 from .agents import deepseek, gpt, groq
 from .intent import is_non_product_chitchat, needs_clarification
 from .schemas import (
-    BrandOption,
-    BrandPriceResponse,
     ClarifyFacet,
     ClarifyOptions,
     ClarifyResponse,
@@ -688,27 +686,3 @@ def _is_ambiguous_facets(query: str, facets: list[ClarifyFacet]) -> bool:
     """facet 중 하나라도 옵션이 2개 이상이고 아직 질의에 반영되지 않았으면
     사용자에게 물어볼 만큼 애매하다고 본다."""
     return any(len(f.options) > 1 and not _facet_resolved(query, f) for f in facets)
-
-
-async def run_brand_price(query: str, brand: str) -> BrandPriceResponse:
-    """브랜드로 좁힌 검색 - run_elevenst_only_debate()와 같은 원칙(LLM 미사용,
-    11번가 오픈 API 구조화 데이터 + _product_name_matches 관련성 가드)으로
-    브랜드명을 검색어에 덧붙여 찾는다."""
-    items = await elevenst.search_elevenst(f"{query} {brand}", limit=10)
-    relevant = [it for it in items if price_table_module._product_name_matches(query, it["product_name"])]
-
-    if not relevant:
-        return BrandPriceResponse(
-            query=query, brand=brand, error=f"'{brand}' 브랜드 상품을 찾지 못했습니다."
-        )
-
-    best = min(relevant, key=lambda it: it["price_krw"])
-    option = BrandOption(
-        brand=brand,
-        product_name=best["product_name"],
-        price=f"{best['price_krw']:,}원",
-        retailer=best["seller"],
-        url=best["url"],
-        reasoning="11번가 오픈 API(ProductSearch) 실측 - LLM 미사용, 구조화 데이터 기반 최저가 선택",
-    )
-    return BrandPriceResponse(query=query, brand=brand, option=option)

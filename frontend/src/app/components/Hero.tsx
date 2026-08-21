@@ -20,9 +20,7 @@ export const Hero = () => {
     ocrBusy,
     sessionPreferences,
     sendMessage,
-    selectBrand,
     selectFacets,
-    selectClarifyOption,
     retryTurn,
     editTurn,
     handleImageUpload,
@@ -450,9 +448,7 @@ export const Hero = () => {
                               <SearchResults
                                 result={turn.result}
                                 sessionPreferences={sessionPreferences}
-                                onSelectBrand={(brand) => selectBrand(turn.id, brand)}
                                 onConfirmFacets={(selected) => selectFacets(turn.id, selected)}
-                                onSelectClarifyOption={(step, value) => selectClarifyOption(turn.id, step, value)}
                               />
                               <div className="mt-2 flex items-center gap-2 opacity-0 group-hover/assistant:opacity-100 transition-opacity">
                                 <span className="text-[11px] text-neutral-400 px-1">{formatTime(turn.createdAt)}</span>

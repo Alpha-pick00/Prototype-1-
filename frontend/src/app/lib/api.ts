@@ -222,21 +222,6 @@ export async function recordPreference(token: string, label: string, value: stri
   }
 }
 
-export async function decide(query: string, brand?: string): Promise<DecideResult> {
-  const response = await fetch(`${API_URL}/decide`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(brand ? { query, brand } : { query }),
-  });
-
-  if (!response.ok) {
-    const body = await response.json().catch(() => null);
-    throw new ApiError(body?.detail || `요청이 실패했습니다 (${response.status})`);
-  }
-
-  return response.json();
-}
-
 export type DecideStage = 'searching';
 
 export type DecideStreamEvent =
@@ -256,9 +241,7 @@ export type DecideStreamEvent =
 export async function decideStream(
   query: string,
   onEvent: (event: DecideStreamEvent) => void,
-  brand?: string,
   signal?: AbortSignal,
-  skipIntentCheck?: boolean,
   baseQuery?: string
 ): Promise<void> {
   const response = await fetch(`${API_URL}/decide/stream`, {
@@ -266,8 +249,6 @@ export async function decideStream(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       query,
-      ...(brand ? { brand } : {}),
-      ...(skipIntentCheck ? { skip_intent_check: true } : {}),
       ...(baseQuery ? { base_query: baseQuery } : {}),
     }),
     signal,
@@ -314,25 +295,6 @@ export async function extractOcr(file: File): Promise<OcrExtractResponse> {
   return response.json();
 }
 
-const FALLBACK_CLARIFY_QUESTION = '몇 가지 후보를 찾았어요 — 아래에서 골라주시겠어요?';
-
-/** 이번 라운드에 물어볼 축(브랜드/제품/용량/개수)의 후보들을 실제 상담원처럼
- * 자연스러운 질문 문장으로 바꿔달라고 서버(GPT)에 요청한다 — "브랜드를
- * 선택하면 좁혀드려요" 같은 고정 라벨 대신 채팅 말풍선으로 먼저 보여줄 문장. */
-export async function askClarifyQuestion(query: string, options: string[]): Promise<string> {
-  try {
-    const response = await fetch(`${API_URL}/clarify/ask`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, options }),
-    });
-    if (!response.ok) return FALLBACK_CLARIFY_QUESTION;
-    const data: { message: string } = await response.json();
-    return data.message || FALLBACK_CLARIFY_QUESTION;
-  } catch {
-    return FALLBACK_CLARIFY_QUESTION;
-  }
-}
 
 export async function fetchAutocomplete(query: string, signal?: AbortSignal): Promise<string[]> {
   const trimmed = query.trim();

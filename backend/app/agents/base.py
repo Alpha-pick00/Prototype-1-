@@ -1,22 +1,6 @@
 import json
 import re
 
-CLARIFY_ASK_INSTRUCTIONS = (
-    "당신은 쇼핑을 도와주는 챗봇입니다. 사용자가 검색한 상품 중 아래 후보들 중 "
-    "어떤 걸 찾는지 확인이 필요합니다. 후보 목록을 그대로 나열하거나 \"~를 "
-    "선택하세요\" 같은 딱딱한 안내문 대신, 실제 상담원이 대화하듯 자연스러운 "
-    "한두 문장으로 물어보세요 — 후보 중 몇 가지를 예시로 자연스럽게 언급해도 "
-    "좋습니다. 매번 표현을 다르게 해서 기계적으로 반복하지 마세요. "
-    "반드시 아래 JSON 형식으로만 답하세요. 다른 텍스트를 덧붙이지 마세요.\n\n"
-    '{"message": "..."}'
-)
-
-
-def build_clarify_ask_prompt(query: str, options: list[str]) -> str:
-    options_block = "\n".join(f"- {o}" for o in options)
-    return f"{CLARIFY_ASK_INSTRUCTIONS}\n\n사용자 질의: {query}\n\n후보:\n{options_block}"
-
-
 RECOMMEND_INSTRUCTIONS = (
     "당신은 검증된 쇼핑 후보 중 사용자에게 가장 추천할 만한 상품 하나를 고르는 "
     "에이전트입니다. 아래 후보는 전부 실제 검색으로 존재가 확인된 상품입니다 "
